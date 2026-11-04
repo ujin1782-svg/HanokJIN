@@ -7,7 +7,7 @@ import type { CadDoc, MaterialKey, Opening, OpeningKind, Params, Pillar, Project
 import { clampParam, DEFAULT_PARAMS } from '../core/params';
 import { computeFootprint } from '../model/footprint';
 import { defaultPalette } from '../model/palettes';
-import { drawingFromProject } from '../samples';
+import { drawingFromProject } from '../model/plan-drawing';
 
 export type FaceKey = 'front' | 'rear' | 'left' | 'right';
 
@@ -214,221 +214,6 @@ export async function analyzeFacePhoto(slot: FacePhotoSlot): Promise<void> {
 }
 
 /**
- * 4면 [전·후·좌·우] 한옥 샘플 사진을 절차적으로 고해상도 렌더링하여 생성한다.
- * 카메라가 없거나 사진 파일이 준비되지 않은 사용자도 즉시 4면 프레임 촬영 → 3D 생성을 체험할 수 있다.
- */
-export function generateSampleFourViews(preset: 'paljak-5kan' | 'matbae-3kan' | 'dancheong-3kan' = 'paljak-5kan'): Record<FaceKey, string> {
-  const cfg = preset === 'matbae-3kan'
-    ? { frontBays: 3, sideBays: 2, roof: 'matbae' as RoofType, wood: '#7b5233', wall: '#e6d8be', tile: '#3c4045', stone: '#a8a194', win: '#f2e5c6' }
-    : preset === 'dancheong-3kan'
-      ? { frontBays: 3, sideBays: 2, roof: 'paljak' as RoofType, wood: '#963828', beam: '#367866', wall: '#f2ead9', tile: '#3e444b', stone: '#c2bbb0', win: '#f6ebd0' }
-      : { frontBays: 5, sideBays: 2, roof: 'paljak' as RoofType, wood: '#b88352', wall: '#f3ede1', tile: '#454c54', stone: '#c6bfb2', win: '#f8efd8' };
-
-  const out = {} as Record<FaceKey, string>;
-  for (const face of ['front', 'rear', 'left', 'right'] as FaceKey[]) {
-    const W = 800, H = 600;
-    const c = document.createElement('canvas');
-    c.width = W; c.height = H;
-    const g = c.getContext('2d')!;
-    const isSide = face === 'left' || face === 'right';
-    const bays = isSide ? cfg.sideBays : cfg.frontBays;
-
-    // 1) 자연스러운 하늘과 먼 산 배경
-    const sky = g.createLinearGradient(0, 0, 0, H * 0.82);
-    sky.addColorStop(0, '#8fb8de');
-    sky.addColorStop(0.55, '#cfe0ef');
-    sky.addColorStop(1, '#eae4d7');
-    g.fillStyle = sky;
-    g.fillRect(0, 0, W, H);
-
-    // 먼 산 실루엣
-    g.fillStyle = '#b7c7d6';
-    g.beginPath();
-    g.moveTo(0, H * 0.72);
-    g.quadraticCurveTo(W * 0.25, H * 0.56, W * 0.52, H * 0.68);
-    g.quadraticCurveTo(W * 0.78, H * 0.54, W, H * 0.69);
-    g.lineTo(W, H); g.lineTo(0, H); g.closePath(); g.fill();
-
-    // 마당 백토 지면
-    const grd = g.createLinearGradient(0, H * 0.78, 0, H);
-    grd.addColorStop(0, '#d7cfc0');
-    grd.addColorStop(1, '#bdb3a0');
-    g.fillStyle = grd;
-    g.fillRect(0, H * 0.78, W, H * 0.22);
-
-    const ridgeY = H * 0.22;
-    const eaveY = H * 0.50;
-    const gidanY = H * 0.78;
-    const groundY = H * 0.86;
-    const leftX = W * (isSide ? 0.24 : 0.16);
-    const rightX = W * (isSide ? 0.76 : 0.84);
-    const eaveLeftX = W * (isSide ? 0.14 : 0.08);
-    const eaveRightX = W * (isSide ? 0.86 : 0.92);
-
-    // 2) 기단(장대석)과 디딤돌
-    g.fillStyle = cfg.stone;
-    g.fillRect(leftX - 28, gidanY, (rightX - leftX) + 56, groundY - gidanY);
-    g.strokeStyle = 'rgba(40,35,30,0.45)';
-    g.lineWidth = 2;
-    g.strokeRect(leftX - 28, gidanY, (rightX - leftX) + 56, groundY - gidanY);
-    const midY = (gidanY + groundY) / 2;
-    g.beginPath(); g.moveTo(leftX - 28, midY); g.lineTo(rightX + 28, midY); g.stroke();
-    for (let x = leftX + 40; x < rightX; x += 90) {
-      g.beginPath(); g.moveTo(x, gidanY); g.lineTo(x, groundY); g.stroke();
-    }
-
-    // 3) 외벽 및 칸별 창호·문
-    const spanW = rightX - leftX;
-    const bayW = spanW / bays;
-    g.fillStyle = cfg.wall;
-    g.fillRect(leftX, eaveY, spanW, gidanY - eaveY);
-
-    // 상·중·하 인방
-    g.fillStyle = cfg.wood;
-    g.fillRect(leftX, eaveY, spanW, 14);
-    g.fillRect(leftX, gidanY - 12, spanW, 12);
-
-    for (let i = 0; i < bays; i++) {
-      const bx = leftX + i * bayW;
-      const isCenter = !isSide && i === Math.floor(bays / 2);
-      const hasDoor = (face === 'front' && isCenter) || (face === 'front' && bays >= 5 && (i === 1 || i === 3));
-      const hasWin = !hasDoor && ((face === 'front') || (face === 'rear' && i % 2 === 0) || (isSide && i === 1));
-
-      if (hasDoor) {
-        const dw = bayW * 0.72, dh = (gidanY - eaveY) * 0.78;
-        const dx = bx + (bayW - dw) / 2, dy = gidanY - dh - 10;
-        g.fillStyle = cfg.win;
-        g.fillRect(dx, dy, dw, dh);
-        g.strokeStyle = cfg.wood;
-        g.lineWidth = 5;
-        g.strokeRect(dx, dy, dw, dh);
-        g.beginPath(); g.moveTo(dx + dw / 2, dy); g.lineTo(dx + dw / 2, dy + dh); g.stroke();
-        g.lineWidth = 1.5;
-        for (let sx = dx + 10; sx < dx + dw; sx += 12) { g.beginPath(); g.moveTo(sx, dy); g.lineTo(sx, dy + dh); g.stroke(); }
-        for (const r of [0.22, 0.5, 0.78]) { g.beginPath(); g.moveTo(dx, dy + dh * r); g.lineTo(dx + dw, dy + dh * r); g.stroke(); }
-      } else if (hasWin) {
-        const ww = bayW * 0.64, wh = (gidanY - eaveY) * 0.48;
-        const wx = bx + (bayW - ww) / 2, wy = eaveY + (gidanY - eaveY) * 0.22;
-        // 머름중방
-        g.fillStyle = cfg.wood;
-        g.fillRect(bx, wy + wh, bayW, 7);
-        g.fillStyle = cfg.win;
-        g.fillRect(wx, wy, ww, wh);
-        g.strokeStyle = cfg.wood;
-        g.lineWidth = 4;
-        g.strokeRect(wx, wy, ww, wh);
-        g.beginPath(); g.moveTo(wx + ww / 2, wy); g.lineTo(wx + ww / 2, wy + wh); g.stroke();
-        g.lineWidth = 1.4;
-        for (let sx = wx + 9; sx < wx + ww; sx += 11) { g.beginPath(); g.moveTo(sx, wy); g.lineTo(sx, wy + wh); g.stroke(); }
-      } else {
-        // 중인방이 있는 회벽 칸
-        g.fillStyle = cfg.wood;
-        g.fillRect(bx, eaveY + (gidanY - eaveY) * 0.55, bayW, 8);
-      }
-    }
-
-    // 4) 기둥(주열)과 초석
-    for (let i = 0; i <= bays; i++) {
-      const px = leftX + i * bayW;
-      // 초석
-      g.fillStyle = '#8d867a';
-      g.fillRect(px - 14, gidanY - 10, 28, 12);
-      // 기둥(음영 그라디언트)
-      const pg = g.createLinearGradient(px - 10, 0, px + 10, 0);
-      pg.addColorStop(0, cfg.wood);
-      pg.addColorStop(0.35, '#d49e6a');
-      pg.addColorStop(1, '#6e4726');
-      g.fillStyle = pg;
-      g.fillRect(px - 10, eaveY, 20, gidanY - eaveY - 8);
-    }
-
-    // 창방·도리·서까래 마구리(처마 밑 그림자)
-    g.fillStyle = (cfg as { beam?: string }).beam ?? cfg.wood;
-    g.fillRect(leftX - 8, eaveY - 14, spanW + 16, 14);
-    const eaveShadow = g.createLinearGradient(0, eaveY - 18, 0, eaveY + 16);
-    eaveShadow.addColorStop(0, 'rgba(15,12,8,0.65)');
-    eaveShadow.addColorStop(1, 'rgba(15,12,8,0)');
-    g.fillStyle = eaveShadow;
-    g.fillRect(leftX - 10, eaveY - 6, spanW + 20, 22);
-
-    // 5) 지붕(앙곡 곡선과 기와 골, 측면 합각벽/박공벽)
-    g.save();
-    g.beginPath();
-    if (isSide && cfg.roof === 'matbae') {
-      // 맞배지붕 측면: 삼각형 박공지붕
-      const cx = (leftX + rightX) / 2;
-      g.moveTo(eaveLeftX, eaveY + 4);
-      g.quadraticCurveTo((eaveLeftX + cx) / 2, (eaveY + ridgeY) / 2 + 12, cx, ridgeY);
-      g.quadraticCurveTo((cx + eaveRightX) / 2, (eaveY + ridgeY) / 2 + 12, eaveRightX, eaveY + 4);
-      g.closePath();
-      g.fillStyle = cfg.wall;
-      g.fill();
-      g.strokeStyle = cfg.tile;
-      g.lineWidth = 18;
-      g.stroke();
-    } else {
-      const rLeft = isSide ? leftX + spanW * 0.26 : leftX + spanW * 0.14;
-      const rRight = isSide ? rightX - spanW * 0.26 : rightX - spanW * 0.14;
-      g.moveTo(eaveLeftX, eaveY - 12);
-      g.quadraticCurveTo(leftX, eaveY + 6, (leftX + rightX) / 2, eaveY + 8);
-      g.quadraticCurveTo(rightX, eaveY + 6, eaveRightX, eaveY - 12);
-      g.quadraticCurveTo((eaveRightX + rRight) / 2, (eaveY + ridgeY) / 2 + 10, rRight, ridgeY);
-      g.lineTo(rLeft, ridgeY);
-      g.quadraticCurveTo((eaveLeftX + rLeft) / 2, (eaveY + ridgeY) / 2 + 10, eaveLeftX, eaveY - 12);
-      g.closePath();
-      const rg = g.createLinearGradient(0, ridgeY, 0, eaveY);
-      rg.addColorStop(0, '#2e3338');
-      rg.addColorStop(0.5, cfg.tile);
-      rg.addColorStop(1, '#586069');
-      g.fillStyle = rg;
-      g.fill();
-
-      // 기와 골 세로 줄무늬
-      g.clip();
-      g.strokeStyle = 'rgba(20,24,28,0.38)';
-      g.lineWidth = 2;
-      for (let x = eaveLeftX; x <= eaveRightX; x += 11) {
-        g.beginPath(); g.moveTo(x, ridgeY); g.lineTo(x + (x - W / 2) * 0.12, eaveY + 10); g.stroke();
-      }
-      // 측면 팔작지붕 합각벽(삼각형)
-      if (isSide && cfg.roof === 'paljak') {
-        const cx = (leftX + rightX) / 2;
-        g.fillStyle = cfg.wall;
-        g.beginPath();
-        g.moveTo(cx, ridgeY + 6);
-        g.lineTo(cx - spanW * 0.28, (ridgeY + eaveY) / 2 + 14);
-        g.lineTo(cx + spanW * 0.28, (ridgeY + eaveY) / 2 + 14);
-        g.closePath();
-        g.fill();
-        g.strokeStyle = cfg.wood;
-        g.lineWidth = 4;
-        g.stroke();
-      }
-    }
-    g.restore();
-
-    // 용마루 및 망와
-    const rLeft = isSide ? leftX + spanW * 0.26 : leftX + spanW * 0.14;
-    const rRight = isSide ? rightX - spanW * 0.26 : rightX - spanW * 0.14;
-    g.fillStyle = '#2b3035';
-    g.fillRect(rLeft - 6, ridgeY - 10, (rRight - rLeft) + 12, 12);
-    g.fillRect(rLeft - 10, ridgeY - 18, 14, 18);
-    g.fillRect(rRight - 4, ridgeY - 18, 14, 18);
-
-    // 좌상단 방위 배지 워터마크
-    const meta = FACE_META.find((m) => m.key === face)!;
-    g.fillStyle = 'rgba(25,22,18,0.68)';
-    g.fillRect(18, 18, 165, 32);
-    g.fillStyle = '#fff';
-    g.font = '600 14px "Noto Sans KR", sans-serif';
-    g.fillText(`촬영 시점: ${meta.short}`, 30, 39);
-
-    out[face] = c.toDataURL('image/jpeg', 0.9);
-  }
-  return out;
-}
-
-/**
  * 4면 [전·후·좌·우] 슬롯과 옵션으로부터 HanokJIN의 표준 Project + CadDoc + Sheet[]를 생성한다.
  */
 export function buildProjectFromFourViews(
@@ -546,7 +331,6 @@ export function buildProjectFromFourViews(
     version: 3,
     id: `photo4v-${Date.now().toString(36)}`,
     name: opts.projectName.trim() || '4면 사진 기반 한옥 모델',
-    demo: false,
     source: {
       fileName: '4면 사진 촬영 [전·후·좌·우]',
       format: '4-View Photo Photogrammetry',
@@ -580,6 +364,7 @@ export function buildProjectFromFourViews(
       opts.useExtractedColors ? '촬영된 4면 사진에서 기와·회벽·목재·석재 대표 색감을 추출해 적용했습니다.' : '전통 한옥 표준 재질 팔레트를 적용했습니다.',
     ],
     reviewed: true,
+    damages: [],
   };
 
   // 7) 4면 [전(S), 후(N), 좌(W), 우(E)] 칸별 개구부(문·창호·벽) 매핑

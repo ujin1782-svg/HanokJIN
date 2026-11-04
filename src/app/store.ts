@@ -11,10 +11,12 @@ export type Selection =
 
 export type Layout = 'split' | 'drawing' | 'model';
 export type Tool = 'select' | 'addPillar' | 'calibrate';
-export type BottomTab = 'checks' | 'bom' | 'joinery';
+export type BottomTab = 'checks' | 'bom' | 'joinery' | 'damage';
+export type Mode = 'model' | 'survey';
 export type SaveState = 'none' | 'saving' | 'saved' | 'error';
 
 export interface UIState {
+  mode: Mode;               // 모델링 / 손상 조사
   layout: Layout;
   drawer: boolean;
   drawerTab: 'color' | 'shape' | 'advanced';
@@ -30,7 +32,7 @@ export interface UIState {
   exported: boolean;
 }
 
-type EventName = 'project' | 'params' | 'palette' | 'cad' | 'selection' | 'ui' | 'save' | 'history' | 'model';
+type EventName = 'project' | 'params' | 'palette' | 'cad' | 'selection' | 'ui' | 'save' | 'history' | 'model' | 'damage';
 
 const HISTORY_LIMIT = 80;
 
@@ -42,7 +44,7 @@ export class Store {
   selection: Selection = null;
   saveState: SaveState = 'none';
   ui: UIState = {
-    layout: 'split', drawer: false, drawerTab: 'color', bottom: false, bottomTab: 'checks', tool: 'select',
+    mode: 'model', layout: 'split', drawer: false, drawerTab: 'color', bottom: false, bottomTab: 'checks', tool: 'select',
     hiddenLayers: new Set(), layerColors: false, overlay: { grid: true, pillars: true, walls: true },
     hiddenGroups: new Set(), explode: 0, section: { axis: 'none', pos: 1 }, exported: false,
   };
@@ -71,7 +73,7 @@ export class Store {
   }
 
   /** 되돌리기 가능한 변경. kind로 다시 그릴 범위를 알린다. */
-  commit(label: string, fn: (p: Project) => void, kind: 'project' | 'params' | 'palette' = 'project') {
+  commit(label: string, fn: (p: Project) => void, kind: 'project' | 'params' | 'palette' | 'damage' = 'project') {
     if (!this.project) return;
     this.past.push({ label, json: JSON.stringify(this.project) });
     if (this.past.length > HISTORY_LIMIT) this.past.shift();
@@ -98,7 +100,7 @@ export class Store {
     this.future.push({ label: prev.label, json: JSON.stringify(this.project) });
     this.project = JSON.parse(prev.json);
     this.fixSelection();
-    this.emit('project', 'history', 'selection');
+    this.emit('project', 'damage', 'history', 'selection');
     return prev.label;
   }
 
@@ -108,7 +110,7 @@ export class Store {
     this.past.push({ label: next.label, json: JSON.stringify(this.project) });
     this.project = JSON.parse(next.json);
     this.fixSelection();
-    this.emit('project', 'history', 'selection');
+    this.emit('project', 'damage', 'history', 'selection');
     return next.label;
   }
 

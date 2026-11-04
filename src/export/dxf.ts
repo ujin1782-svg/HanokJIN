@@ -2,7 +2,7 @@
 // 한글은 AutoCAD가 읽는 \U+XXXX 형식으로 적는다.
 
 import type { Project } from '../core/types';
-import { drawingFromProject } from '../samples';
+import { drawingFromProject } from '../model/plan-drawing';
 
 const ACI: Record<string, number> = { CEN: 1, WALL: 7, WIN: 4, DOOR: 2, COL: 3, 주열마크: 7, 주열번호: 6, ROOM: 7, TIT: 7 };
 

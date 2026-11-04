@@ -1,15 +1,16 @@
-// 앱 조립: 머리글·단계 안내·작업 공간·패널·대화상자·단축키·자동 저장 + 4면[전·후·좌·우] 사진 기반 3D 생성 연동.
+// 앱 조립: 머리글·단계 안내·작업 공간·패널·대화상자·단축키·자동 저장.
+// 두 가지 모드: 모델링(도면·4면 사진 → 3D) / 손상 조사(부재별 손상 사진·표준 용어 판정 → 조사표·학습 데이터).
 
-import type { CheckResult, Pillar } from '../core/types';
+import type { CheckResult, DamageRecord, DamageTarget, Pillar } from '../core/types';
 import { STAGE_LABEL, SUPPORTED, checkFile, type Stage, type ParseResult } from '../cad/pipeline';
 import { scaleDoc } from '../cad/normalize';
 import { segmentSheets } from '../cad/sheets';
 import { recognize } from '../cad/recognize';
-import { DEMOS, makeDemo } from '../samples';
+import { drawingFromProject } from '../model/plan-drawing';
 import { FORMATS, runExport, type ExportFormat } from '../export/files';
-import { store, type Layout } from './store';
+import { store, type Layout, type Mode } from './store';
 import { loadCad, LoadError } from './loader';
-import { loadSession, saveSession, clearSession, type Session } from './persist';
+import { loadSession, saveSession, clearSession, putPhoto, prunePhotos, type Session } from './persist';
 import { h, icon, iconBtn } from '../ui/dom';
 import { DrawingView } from '../ui/drawing';
 import { Viewport } from '../ui/viewport';
@@ -17,6 +18,9 @@ import { Inspector } from '../ui/inspector';
 import { BottomPanel } from '../ui/bottom';
 import { confirmDialog, openModal, promptNumber, toast } from '../ui/modal';
 import { openPhotoModelingModal } from '../ui/photo-modal';
+import { openDamageEditor, type PendingPhoto } from '../ui/damage-editor';
+import { openDamageGuide } from '../ui/damage-guide';
+import { blankDamage, summarize, targetLabel } from '../damage/records';
 
 export class App {
   private drawing: DrawingView;
@@ -31,9 +35,15 @@ export class App {
 
   constructor(root: HTMLElement) {
     this.drawing = new DrawingView({ addPillar: (x, y) => this.addPillar(x, y), calibrate: (d) => this.calibrate(d) });
-    this.viewport = new Viewport();
-    this.inspector = new Inspector({ deletePillar: (id) => this.deletePillar(id), focusPillar: (id) => this.focusPillar(id) });
-    this.bottom = new BottomPanel({ focus: (c) => this.focusCheck(c), exportCsv: () => this.doExport('csv'), getBuild: () => this.viewport.build });
+    this.viewport = new Viewport({ addDamage: (t) => this.addDamage(t), showDamages: (t) => this.showDamages(t) });
+    this.inspector = new Inspector({
+      deletePillar: (id) => this.deletePillar(id), focusPillar: (id) => this.focusPillar(id),
+      addDamage: (t) => this.addDamage(t), editDamage: (id) => this.editDamage(id), openGuide: () => openDamageGuide(), exportDamage: () => this.openExport(true),
+    });
+    this.bottom = new BottomPanel({
+      focus: (c) => this.focusCheck(c), exportCsv: () => this.doExport('csv'), getBuild: () => this.viewport.build,
+      editDamage: (id) => this.editDamage(id), exportDamage: () => this.openExport(true),
+    });
 
     const splitter = h('div', { class: 'splitter', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '창 크기 조절', tabindex: 0 });
     this.workspace = h('main', { class: 'workspace', 'data-layout': 'split' }, this.drawing.el, splitter, this.viewport.el, this.inspector.el);
@@ -47,7 +57,9 @@ export class App {
     store.on('palette', () => this.renderHeader());
     store.on('save', () => this.renderHeader());
     store.on('model', () => this.renderHeader());
-    store.on('ui', () => this.applyLayout());
+    store.on('damage', () => this.renderHeader());
+    let lastMode = store.ui.mode;
+    store.on('ui', () => { if (lastMode !== store.ui.mode) { lastMode = store.ui.mode; this.renderHeader(); } this.applyLayout(); });
     window.addEventListener('resize', () => this.applyLayout());
     this.setupKeys();
     this.setupDrop();
@@ -61,25 +73,27 @@ export class App {
   /* ───── 시작 화면 ───── */
   private async renderStart() {
     const session = await loadSession();
-    const demoCards = DEMOS.map((d) => h('button', { class: 'demo-card', type: 'button', onclick: () => this.openDemo(d.id) },
-      h('b', null, d.name), h('span', null, d.desc), h('span', { class: 'badge demo' }, '데모 데이터')));
+    const entry = (ic: string, title: string, desc: string, note: string, label: string, run: () => void, cls = '') =>
+      h('div', { class: `drop-zone ${cls}`, tabindex: 0, role: 'button', 'aria-label': label, onclick: run, onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); run(); } } },
+        icon(ic, 28), h('b', null, title), h('span', null, desc), h('span', { class: 'muted' }, note));
+    const flow = [
+      ['upload', '불러오기', 'DWG·DXF 평면도 또는 건물 4면 사진'],
+      ['cube', '3D 모델', '격자·기둥 인식 검토, 지붕·공포·재질 편집'],
+      ['alert', '손상 조사', '부재별 사진·손상 영역·표준 용어 판정'],
+      ['download', '내보내기', 'IFC·glTF·DXF·물량표, 조사표·학습 데이터셋'],
+    ] as const;
     this.start.replaceChildren(h('div', { class: 'start-card' },
       h('div', { class: 'start-mark' }, logo(44)),
-      h('h1', null, '한옥 도면과 4면 사진을 3D 모델로'),
-      h('p', { class: 'lead' }, 'DWG·DXF 도면을 올리거나 건물의 4면[전·후·좌·우]을 지정 프레임에 맞춰 촬영하면, 사실적인 질감과 조명을 갖춘 한옥 3D 모델을 만듭니다.'),
-      h('div', { class: 'start-entry-grid' },
-        h('div', { class: 'drop-zone', tabindex: 0, role: 'button', 'aria-label': '도면 파일 열기', onclick: () => this.pickFile(), onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') this.pickFile(); } },
-          icon('upload', 28), h('b', null, 'CAD 도면 파일 열기'), h('span', null, 'DWG · DXF 평면도를 끌어다 놓으세요'),
-          h('span', { class: 'muted' }, 'AutoCAD R13~2018 · ASCII DXF · 80MB 이하')),
-        h('div', { class: 'drop-zone photo-entry-zone', tabindex: 0, role: 'button', 'aria-label': '4면 사진으로 3D 만들기', onclick: () => this.openPhotoStudio(), onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') this.openPhotoStudio(); } },
-          icon('camera', 28), h('b', null, '4면 사진으로 3D 만들기 [전·후·좌·우]'), h('span', null, '지정 프레임에 맞춰 4면을 촬영·업로드합니다'),
-          h('span', { class: 'badge drawing' }, 'NEW · 실시간 카메라 및 4면 샘플 제공')),
-      ),
+      h('h1', null, '한옥 3D 모델링과 손상 조사를 한곳에서'),
+      h('p', { class: 'lead' }, '도면이나 4면 사진으로 한옥 3D 모델을 만들고, 기둥·부재마다 손상을 사진과 함께 표준 용어로 기록합니다.'),
       session ? h('button', { class: 'btn resume', type: 'button', onclick: () => this.resume(session) }, icon('reset', 16),
-        h('span', null, h('b', null, '이어서 작업하기'), h('span', { class: 'muted' }, ` ${session.project.name} · ${new Date(session.savedAt).toLocaleString('ko-KR')}`))) : null,
-      h('div', { class: 'start-sub' }, '예제로 먼저 둘러보기'),
-      h('div', { class: 'demo-grid' }, ...demoCards),
-      h('ol', { class: 'start-steps' }, ...['도면 / 4면 사진 준비', '프레임·인식 검토', '3D 생성', 'PBR 재질·조명 편집', '내보내기'].map((s, i) => h('li', null, h('span', null, String(i + 1)), s))),
+        h('span', null, h('b', null, '이어서 작업하기'), h('span', { class: 'muted' }, ` ${session.project.name} · ${new Date(session.savedAt).toLocaleString('ko-KR')}${session.project.damages.length ? ` · 손상 기록 ${session.project.damages.length}건` : ''}`))) : null,
+      h('div', { class: 'start-entry-grid' },
+        entry('upload', 'CAD 도면 열기', 'DWG · DXF 평면도를 끌어다 놓거나 눌러서 고르세요', 'AutoCAD R13~2018 · ASCII DXF · 80MB 이하', '도면 파일 열기', () => this.pickFile()),
+        entry('camera', '4면 사진으로 만들기', '정면·배면·좌측면·우측면을 지정 프레임에 맞춰 촬영하거나 올립니다', '도면이 없는 건물에 알맞습니다', '4면 사진으로 3D 만들기', () => this.openPhotoStudio(), 'photo-entry-zone')),
+      h('ol', { class: 'start-flow' }, ...flow.map(([ic, t, d], i) => h('li', null,
+        h('span', { class: 'flow-ic' }, icon(ic, 18)), h('b', null, `${i + 1}. ${t}`), h('span', null, d)))),
+      h('button', { class: 'btn ghost sm start-guide', type: 'button', onclick: () => openDamageGuide() }, icon('help', 14), '손상 표준 용어 안내 (14개 분류 · 보고서 표기 81종)'),
     ));
     this.applyLayout();
   }
@@ -95,14 +109,6 @@ export class App {
     });
   }
 
-  private openDemo(id: string) {
-    const { project, doc, sheets } = makeDemo(id);
-    this.pendingFile = undefined;
-    store.open(project, doc, sheets);
-    this.afterOpen();
-    toast('예제 프로젝트를 열었습니다. 실제 도면 값이 아닌 데모 데이터입니다.', 'info');
-  }
-
   private async resume(s: Session) {
     if (s.file) {
       const job = loadCad(new File([s.file.bytes], s.file.name), () => {});
@@ -114,14 +120,12 @@ export class App {
         toast('저장된 도면을 다시 읽지 못해 모델만 불러왔습니다.', 'warn');
         store.open(s.project, null, []);
       }
-    } else if (s.project.demo) {
-      const id = DEMOS.find((d) => s.project.id.startsWith(d.id))?.id ?? DEMOS[0].id;
-      const { doc, sheets } = makeDemo(id);
-      store.open(s.project, doc, sheets);
     } else {
-      const { doc, sheets } = makeDemo(DEMOS[0].id);
-      store.open(s.project, doc, sheets);
+      // 도면 없이 만든 모델(4면 사진)은 모델에서 평면도를 다시 그린다.
+      const doc = drawingFromProject(s.project, `${s.project.name} 평면도`);
+      store.open(s.project, doc, [{ id: 'sheet-1', kind: 'PLAN', title: '평면도', bounds: doc.extents, entityCount: doc.stats.entities }]);
     }
+    void prunePhotos(new Set(s.project.damages.flatMap((d) => d.photo ? [d.photo.id] : [])));
     this.afterOpen();
   }
 
@@ -227,6 +231,58 @@ export class App {
     if (c.focus?.pillarId) this.focusPillar(c.focus.pillarId);
   }
 
+  /* ───── 손상 조사 ───── */
+  setMode(mode: Mode) {
+    if (store.ui.mode === mode) return;
+    store.setUI({ mode, drawer: mode === 'survey' ? true : store.ui.drawer, bottomTab: mode === 'survey' ? 'damage' : store.ui.bottomTab === 'damage' ? 'checks' : store.ui.bottomTab });
+    if (mode === 'survey' && !store.project?.damages.length) toast('도면이나 3D에서 기둥·부재를 누른 뒤 [손상 기록]으로 사진과 손상을 기록하세요.', 'info');
+  }
+
+  addDamage(target: DamageTarget) {
+    const p = store.project;
+    if (!p) return;
+    this.openDamage(blankDamage(p, target), true);
+  }
+
+  editDamage(id: string) {
+    const d = store.project?.damages.find((x) => x.id === id);
+    if (d) this.openDamage(d, false);
+  }
+
+  private openDamage(rec: DamageRecord, isNew: boolean) {
+    const p = store.project!;
+    openDamageEditor({
+      project: p, record: rec, isNew, partNames: this.viewport.partNames(),
+      onSave: (r, photo) => void this.saveDamage(r, photo, isNew),
+      onDelete: (id) => {
+        store.commit(`손상 기록 ${id} 삭제`, (q) => { q.damages = q.damages.filter((x) => x.id !== id); }, 'damage');
+        toast(`손상 기록 ${id}를 삭제했습니다.`, 'info', { label: '되돌리기', run: () => store.undo() });
+      },
+    });
+  }
+
+  private async saveDamage(rec: DamageRecord, photo: PendingPhoto | undefined, isNew: boolean) {
+    if (photo) {
+      try { await putPhoto(photo.id, photo.blob); }
+      catch { toast('사진을 이 브라우저에 저장하지 못했습니다. 새로고침하면 사진이 사라질 수 있습니다.', 'warn'); }
+    }
+    const p = store.project!;
+    const label = `${targetLabel(p, rec.target)} 손상 ${isNew ? '기록' : '수정'}`;
+    store.commit(label, (q) => {
+      const i = q.damages.findIndex((x) => x.id === rec.id);
+      if (i >= 0) q.damages[i] = rec; else q.damages.push(rec);
+    }, 'damage');
+    if (store.ui.mode !== 'survey') store.setUI({ mode: 'survey', drawer: true });
+    toast(`${rec.id} ${label}을 저장했습니다.`, 'ok', { label: '되돌리기', run: () => store.undo() });
+  }
+
+  /** 대상 부재를 선택하고 손상 기록 목록을 보여 준다. */
+  private showDamages(t: DamageTarget) {
+    if (store.ui.mode !== 'survey') this.setMode('survey');
+    if (t.kind === 'pillar') store.select({ kind: 'pillar', id: t.id });
+    store.setUI({ drawer: true });
+  }
+
   private async calibrate(worldDist: number) {
     if (!store.cad) return;
     const real = await promptNumber('축척 보정', `두 점 사이의 도면상 길이는 ${Math.round(worldDist).toLocaleString()} (도면 단위)입니다. 실제 길이를 mm로 입력하세요.`, 'mm');
@@ -244,35 +300,47 @@ export class App {
   }
 
   /* ───── 내보내기 ───── */
-  openExport() {
+  openExport(damageFirst = store.ui.mode === 'survey') {
     const b = this.viewport.build, p = store.project;
-    if (!p || !b) { toast('내보낼 모델이 없습니다. 먼저 도면을 열거나 4면 사진으로 모델을 생성하세요.', 'warn'); return; }
-    let fmt: ExportFormat = 'ifc';
+    if (!p || !b) { toast('내보낼 모델이 없습니다. 먼저 도면을 열거나 4면 사진으로 모델을 만드세요.', 'warn'); return; }
+    const sum = summarize(p.damages);
+    const formats = FORMATS.filter((f) => !f.damage || sum.total);
+    const groups = [
+      { title: '손상 조사', items: formats.filter((f) => f.damage) },
+      { title: '3D 모델·도면', items: formats.filter((f) => !f.damage) },
+    ];
+    if (!damageFirst) groups.reverse();
+    let fmt: ExportFormat = groups.find((g) => g.items.length)!.items[0].id;
     const visibleOnly = h('input', { type: 'checkbox', checked: true });
+    const verifiedOnly = h('input', { type: 'checkbox', checked: false, disabled: !sum.verified });
     const hidden = store.ui.hiddenGroups.size;
-    const list = h('div', { class: 'format-list', role: 'radiogroup', 'aria-label': '파일 형식' }, ...FORMATS.map((f, i) =>
-      h('label', { class: 'format' }, h('input', { type: 'radio', name: 'fmt', value: f.id, checked: i === 0, onchange: () => { fmt = f.id; } }),
-        h('span', null, h('b', null, f.label), h('span', null, f.desc), h('span', { class: 'muted' }, `쓰는 곳: ${f.usage}`)))));
+    const list = h('div', { class: 'format-list', role: 'radiogroup', 'aria-label': '파일 형식' }, ...groups.filter((g) => g.items.length).flatMap((g) => [
+      h('div', { class: 'format-group' }, g.title),
+      ...g.items.map((f) => h('label', { class: 'format' }, h('input', { type: 'radio', name: 'fmt', value: f.id, checked: f.id === fmt, onchange: () => { fmt = f.id; } }),
+        h('span', null, h('b', null, f.label), h('span', null, f.desc), h('span', { class: 'muted' }, `쓰는 곳: ${f.usage}`))))]));
     const run = h('button', { class: 'btn primary', type: 'button' }, icon('download', 16), '내보내기');
     const m = openModal('내보내기', h('div', null,
-      p.demo ? h('div', { class: 'callout warn' }, icon('alert', 16), h('div', null, '예제(데모) 프로젝트입니다. 실제 도면 값이 아닙니다.')) : null,
       list,
       h('label', { class: 'check' }, visibleOnly, h('span', null, `숨긴 부재 제외 (IFC·glTF)${hidden ? ` — 현재 ${hidden}개 묶음 숨김` : ''}`)),
-      h('p', { class: 'hint' }, '단위는 IFC·glTF는 m, DXF·물량표는 mm입니다. 기와 매수는 지붕 면적에서 낸 추정값입니다.')), [
+      sum.total ? h('label', { class: 'check' }, verifiedOnly, h('span', null, `손상 기록은 검수 완료만 (${sum.verified} / ${sum.total}건)`)) : null,
+      h('p', { class: 'hint' }, '단위는 IFC·glTF는 m, DXF·물량표는 mm입니다. 기와 매수는 지붕 면적에서 낸 추정값입니다.',
+        sum.total ? ` 학습 데이터셋에는 사진이 있는 기록 ${sum.withPhoto}건이 들어갑니다.` : '')), [
       h('button', { class: 'btn', type: 'button', onclick: () => m.close() }, '닫기'), run]);
-    run.onclick = async () => { run.disabled = true; await this.doExport(fmt, visibleOnly.checked); run.disabled = false; m.close(); };
+    run.onclick = async () => { run.disabled = true; const ok = await this.doExport(fmt, visibleOnly.checked, verifiedOnly.checked); run.disabled = false; if (ok) m.close(); };
   }
 
-  private async doExport(fmt: ExportFormat, onlyVisible = true) {
+  private async doExport(fmt: ExportFormat, onlyVisible = true, verifiedOnly = false): Promise<boolean> {
     const b = this.viewport.build, p = store.project;
-    if (!p || !b) return;
+    if (!p || !b) return false;
     try {
-      const r = await this.viewport.withCleanState(() => runExport(fmt, p, b, onlyVisible));
+      const r = await this.viewport.withCleanState(() => runExport(fmt, p, b, onlyVisible, verifiedOnly));
       store.setUI({ exported: true });
       toast(`${r.name} 저장 완료 (${(r.size / 1024).toFixed(0)}KB)`, 'ok');
+      return true;
     } catch (e) {
       console.error(e);
-      toast(`내보내기에 실패했습니다: ${(e as Error).message}. 다른 형식으로 시도해 보세요.`, 'error');
+      toast(`내보내기에 실패했습니다: ${(e as Error).message}.`, 'error');
+      return false;
     }
   }
 
@@ -286,13 +354,17 @@ export class App {
         h('li', null, h('b', null, '인식 검토'), ' — 노란 ! 표시 기둥은 확인이 필요합니다. 아래 "검증 결과"에서 눌러 위치로 이동합니다.'),
         h('li', null, h('b', null, '3D 생성'), ' — 격자와 기둥으로 지붕·보·벽을 자동으로 만듭니다.'),
         h('li', null, h('b', null, '꾸미기·편집'), ' — 오른쪽 위 "꾸미기·설정"에서 사실적인 PBR 재질 프리셋, 지붕 형식, 높이를 바꿉니다.'),
-        h('li', null, h('b', null, '내보내기'), ' — IFC(BIM), glTF(3D), DXF(평면), CSV(물량표).')),
+        h('li', null, h('b', null, '손상 조사'), ' — 위쪽에서 [손상 조사]로 바꾸고 기둥·부재를 눌러 사진·손상 영역·표준 용어·정도를 기록합니다. 기존 보고서 표기(할열, 기울음, 부식 등)는 표준 용어로 교정해 제안합니다.'),
+        h('li', null, h('b', null, '내보내기'), ' — IFC(BIM), glTF(3D), DXF(평면), CSV(물량표), 손상 조사표(CSV), 손상 학습 데이터셋(YOLO·COCO·VLM ZIP).')),
+      h('p', { class: 'hint' }, '손상 판정은 조사자가 합니다. 이 앱은 사진을 자동으로 판정하지 않으며, 용어 교정 제안과 조사내용 문구 초안만 자동으로 만듭니다.'),
       h('h3', null, '마우스'),
       term('도면', '휠: 확대·축소 · 끌기: 이동 · 클릭: 기둥/외벽 칸 선택'),
       term('3D', '끌기: 회전 · 오른쪽 끌기(또는 Shift): 이동 · 휠: 확대 · 클릭: 부재 선택'),
+      term('손상 사진', '끌기: 손상 영역 표시 · 영역 클릭: 선택 · Shift+끌기: 영역 안에서 새로 그리기'),
       h('h3', null, '단축키'),
       term('Ctrl+Z / Ctrl+Y', '실행 취소 / 다시 실행'), term('Delete', '선택한 기둥 삭제(확인 후)'), term('Esc', '도구 끝내기 · 선택 해제'), term('F', '도면 화면 맞춤'),
-    ), [h('button', { class: 'btn danger ghost', type: 'button', onclick: async () => {
+    ), [h('button', { class: 'btn ghost', type: 'button', onclick: () => openDamageGuide() }, icon('help', 15), '손상 용어 안내'),
+      h('button', { class: 'btn danger ghost', type: 'button', onclick: async () => {
       if (await confirmDialog('저장된 작업 지우기', '이 브라우저에 저장된 프로젝트와 도면을 지우고 처음 화면으로 돌아갑니다. 되돌릴 수 없습니다.', '지우기', true)) await this.resetAll();
     } }, icon('trash', 15), '저장된 작업 지우기')], { wide: true });
   }
@@ -312,7 +384,12 @@ export class App {
       { label: '내보내기', done: store.ui.exported, action: () => this.openExport() },
     ];
     const current = steps.findIndex((s) => !s.done);
-    const stepper = h('nav', { class: 'stepper', 'aria-label': '작업 단계' }, ...steps.map((s, i) =>
+    const mode = store.ui.mode;
+    const modeSeg = p ? h('div', { class: 'seg mode-seg', role: 'group', 'aria-label': '작업 모드' }, ...([['model', 'cube', '모델링'], ['survey', 'alert', '손상 조사']] as [Mode, string, string][]).map(([id, ic, label]) =>
+      h('button', { class: `seg-btn ${mode === id ? 'active' : ''}`, type: 'button', 'aria-pressed': String(mode === id), onclick: () => this.setMode(id) }, icon(ic, 15), h('span', null, label),
+        id === 'survey' && p.damages.length ? h('span', { class: 'seg-count' }, String(p.damages.length)) : null))) : null;
+    const stepper = mode === 'survey' && p ? h('div', { class: 'survey-hint' }, icon('pointer', 15), h('span', null, '도면이나 3D에서 기둥·부재를 눌러 손상을 기록하세요'))
+      : h('nav', { class: 'stepper', 'aria-label': '작업 단계' }, ...steps.map((s, i) =>
       h('button', { class: `step ${s.done ? 'done' : i === current ? 'current' : ''}`, type: 'button', disabled: !p && i > 0, 'aria-current': i === current ? 'step' : undefined, 'aria-label': `${i + 1}단계 ${s.label}${s.done ? ' (완료)' : ''}`, 'data-tip': `${i + 1}단계 ${s.label}`, onclick: s.action },
         h('span', { class: 'step-n' }, s.done ? icon('check', 12) : String(i + 1)), h('span', { class: 'step-label' }, s.label))));
 
@@ -338,6 +415,7 @@ export class App {
 
     let primary: HTMLElement;
     if (!p) primary = h('button', { class: 'btn primary', type: 'button', onclick: () => this.pickFile() }, icon('upload', 16), h('span', null, '도면 열기'));
+    else if (mode === 'survey') primary = h('button', { class: 'btn primary', type: 'button', disabled: !p.damages.length, onclick: () => this.openExport(true) }, icon('download', 16), h('span', null, '조사 내보내기'));
     else if (review) primary = h('button', { class: 'btn primary warn', type: 'button', onclick: () => store.setUI({ bottom: true, bottomTab: 'checks' }) }, icon('alert', 16), h('span', null, `검토할 항목 ${review}개`));
     else primary = h('button', { class: 'btn primary', type: 'button', onclick: () => this.openExport() }, icon('download', 16), h('span', null, '내보내기'));
 
@@ -345,21 +423,21 @@ export class App {
       h('div', { class: 'brand' }, logo(26), h('span', { class: 'brand-name' }, 'HanokJIN')),
       p ? h('div', { class: 'project' },
         h('span', { class: 'project-name', title: p.name }, p.name),
-        p.demo ? h('span', { class: 'badge demo' }, '데모') : null,
         saveEl,
         warns ? h('span', { class: 'badge fail' }, `간섭 ${warns}`) : null) : h('div', { class: 'project' }),
+      modeSeg ?? '',
       stepper,
       h('div', { class: 'actions' },
         layoutSeg,
         p ? h('div', { class: 'btn-group hide-sm' }, undo, redo) : null,
-        photoBtn,
-        p ? h('button', { class: `btn ${store.ui.drawer ? 'active' : ''}`, type: 'button', 'aria-pressed': String(store.ui.drawer), 'data-tip': '색감·형태·높이 설정', onclick: () => { if (store.ui.drawer && !store.selection) store.setUI({ drawer: false }); else { store.select(null); store.setUI({ drawer: true }); } } }, icon('palette', 16), h('span', { class: 'hide-md' }, '꾸미기·설정')) : null,
-        p ? iconBtn('upload', '다른 도면 열기', () => this.pickFile(), { cls: 'hide-sm' }) : null,
+        mode === 'survey' ? null : photoBtn,
+        p && mode !== 'survey' ? h('button', { class: `btn ${store.ui.drawer ? 'active' : ''}`, type: 'button', 'aria-pressed': String(store.ui.drawer), 'data-tip': '색감·형태·높이 설정', onclick: () => { if (store.ui.drawer && !store.selection) store.setUI({ drawer: false }); else { store.select(null); store.setUI({ drawer: true }); } } }, icon('palette', 16), h('span', { class: 'hide-md' }, '꾸미기·설정')) : null,
+        p && mode !== 'survey' ? iconBtn('upload', '다른 도면 열기', () => this.pickFile(), { cls: 'hide-sm' }) : null,
         primary,
         iconBtn('help', '도움말', () => this.openHelp()),
       ),
     );
-    document.title = p ? `${p.name} — HanokJIN` : 'HanokJIN — 한옥 도면 & 4면 사진 3D 모델링';
+    document.title = p ? `${p.name} — HanokJIN` : 'HanokJIN — 한옥 3D 모델링 · 손상 조사';
   }
 
   private applyLayout() {

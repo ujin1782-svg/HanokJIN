@@ -5,7 +5,7 @@ import { createMaterials } from '../src/model/materials';
 import { validate } from '../src/model/validate';
 import { exportIfc, stepString } from '../src/export/ifc';
 import { bomCsv } from '../src/export/files';
-import { DEMOS, makeDemo } from '../src/samples';
+import { DEMOS, makeDemo } from './fixtures/demo-projects';
 import type { RoofType } from '../src/core/types';
 
 const mats = createMaterials();

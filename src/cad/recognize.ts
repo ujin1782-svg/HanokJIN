@@ -374,12 +374,12 @@ export function recognize(doc: CadDoc, sheets: Sheet[]): Recognition {
   const params: Params = { ...DEFAULT_PARAMS };
   const paramSource: Project['paramSource'] = {};
   const project: Project = {
-    version: 3, id: `prj-${Date.now().toString(36)}`, name: doc.fileName.replace(/\.(dwg|dxf)$/i, ''), demo: false,
+    version: 3, id: `prj-${Date.now().toString(36)}`, name: doc.fileName.replace(/\.(dwg|dxf)$/i, ''),
     source: { fileName: doc.fileName, format: `${doc.format} · ${doc.version}`, sheetId: plan?.id },
     origin: { x: 0, y: 0 },
     grid: { xs: [], ys: [], labelsX: [], labelsY: [], source: 'drawing' },
     pillars: [], rooms: [], openings: [], params, baseline: { ...params }, paramSource, members: [],
-    palette: defaultPalette(), recognitionNotes: notes, reviewed: false,
+    palette: defaultPalette(), recognitionNotes: notes, reviewed: false, damages: [],
   };
   if (!plan) {
     notes.push('도면에서 시트를 찾지 못했습니다.');
