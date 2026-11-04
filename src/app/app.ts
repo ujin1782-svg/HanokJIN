@@ -1,4 +1,4 @@
-// 앱 조립: 머리글·단계 안내·작업 공간·패널·대화상자·단축키·자동 저장.
+// 앱 조립: 머리글·단계 안내·작업 공간·패널·대화상자·단축키·자동 저장 + 4면[전·후·좌·우] 사진 기반 3D 생성 연동.
 
 import type { CheckResult, Pillar } from '../core/types';
 import { STAGE_LABEL, SUPPORTED, checkFile, type Stage, type ParseResult } from '../cad/pipeline';
@@ -16,6 +16,7 @@ import { Viewport } from '../ui/viewport';
 import { Inspector } from '../ui/inspector';
 import { BottomPanel } from '../ui/bottom';
 import { confirmDialog, openModal, promptNumber, toast } from '../ui/modal';
+import { openPhotoModelingModal } from '../ui/photo-modal';
 
 export class App {
   private drawing: DrawingView;
@@ -64,18 +65,34 @@ export class App {
       h('b', null, d.name), h('span', null, d.desc), h('span', { class: 'badge demo' }, '데모 데이터')));
     this.start.replaceChildren(h('div', { class: 'start-card' },
       h('div', { class: 'start-mark' }, logo(44)),
-      h('h1', null, '한옥 도면을 3D 모델로'),
-      h('p', { class: 'lead' }, 'DWG·DXF 평면도를 올리면 격자와 기둥을 찾아 한옥 3D 모델을 만듭니다. 인식 결과를 확인·수정하고, 색감을 고른 뒤 BIM(IFC)·3D·물량표로 내보낼 수 있습니다.'),
-      h('div', { class: 'drop-zone', tabindex: 0, role: 'button', 'aria-label': '도면 파일 열기', onclick: () => this.pickFile(), onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') this.pickFile(); } },
-        icon('upload', 28), h('b', null, '도면 파일 열기'), h('span', null, '또는 이 창에 파일을 끌어다 놓으세요'),
-        h('span', { class: 'muted' }, 'DWG (AutoCAD R13~2018) · ASCII DXF · 80MB 이하')),
+      h('h1', null, '한옥 도면과 4면 사진을 3D 모델로'),
+      h('p', { class: 'lead' }, 'DWG·DXF 도면을 올리거나 건물의 4면[전·후·좌·우]을 지정 프레임에 맞춰 촬영하면, 사실적인 질감과 조명을 갖춘 한옥 3D 모델을 만듭니다.'),
+      h('div', { class: 'start-entry-grid' },
+        h('div', { class: 'drop-zone', tabindex: 0, role: 'button', 'aria-label': '도면 파일 열기', onclick: () => this.pickFile(), onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') this.pickFile(); } },
+          icon('upload', 28), h('b', null, 'CAD 도면 파일 열기'), h('span', null, 'DWG · DXF 평면도를 끌어다 놓으세요'),
+          h('span', { class: 'muted' }, 'AutoCAD R13~2018 · ASCII DXF · 80MB 이하')),
+        h('div', { class: 'drop-zone photo-entry-zone', tabindex: 0, role: 'button', 'aria-label': '4면 사진으로 3D 만들기', onclick: () => this.openPhotoStudio(), onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') this.openPhotoStudio(); } },
+          icon('camera', 28), h('b', null, '4면 사진으로 3D 만들기 [전·후·좌·우]'), h('span', null, '지정 프레임에 맞춰 4면을 촬영·업로드합니다'),
+          h('span', { class: 'badge drawing' }, 'NEW · 실시간 카메라 및 4면 샘플 제공')),
+      ),
       session ? h('button', { class: 'btn resume', type: 'button', onclick: () => this.resume(session) }, icon('reset', 16),
         h('span', null, h('b', null, '이어서 작업하기'), h('span', { class: 'muted' }, ` ${session.project.name} · ${new Date(session.savedAt).toLocaleString('ko-KR')}`))) : null,
       h('div', { class: 'start-sub' }, '예제로 먼저 둘러보기'),
       h('div', { class: 'demo-grid' }, ...demoCards),
-      h('ol', { class: 'start-steps' }, ...['도면 준비', '인식 검토', '3D 생성', '꾸미기·편집', '내보내기'].map((s, i) => h('li', null, h('span', null, String(i + 1)), s))),
+      h('ol', { class: 'start-steps' }, ...['도면 / 4면 사진 준비', '프레임·인식 검토', '3D 생성', 'PBR 재질·조명 편집', '내보내기'].map((s, i) => h('li', null, h('span', null, String(i + 1)), s))),
     ));
     this.applyLayout();
+  }
+
+  /** 4면 [전·후·좌·우] 지정 프레임 촬영 스튜디오 열기 */
+  openPhotoStudio() {
+    openPhotoModelingModal({
+      onComplete: ({ project, doc, sheets }) => {
+        this.pendingFile = undefined;
+        store.open(project, doc, sheets);
+        this.afterOpen();
+      },
+    });
   }
 
   private openDemo(id: string) {
@@ -101,15 +118,16 @@ export class App {
       const id = DEMOS.find((d) => s.project.id.startsWith(d.id))?.id ?? DEMOS[0].id;
       const { doc, sheets } = makeDemo(id);
       store.open(s.project, doc, sheets);
-    } else store.open(s.project, null, []);
+    } else {
+      const { doc, sheets } = makeDemo(DEMOS[0].id);
+      store.open(s.project, doc, sheets);
+    }
     this.afterOpen();
   }
 
   private afterOpen() {
     this.applyLayout();
-    // 기본 화면은 도면과 3D만. 검토 항목은 머리글의 주황 버튼과 아래 요약 줄로 안내한다.
     store.setUI({ bottom: false, drawer: false, tool: 'select', explode: 0, section: { axis: 'none', pos: 1 } });
-    // 작업 공간이 보인 뒤(크기 확정 후) 두 창을 화면에 맞춘다.
     requestAnimationFrame(() => requestAnimationFrame(() => { this.drawing.fit(); this.viewport.fitView(); }));
     this.scheduleSave();
   }
@@ -158,8 +176,9 @@ export class App {
     openModal('도면을 열 수 없습니다', h('div', { class: 'callout error' }, icon('fail', 18), h('div', null,
       h('b', null, e.message), e.hint ? h('p', null, e.hint) : null,
       h('p', { class: 'muted' }, `파일: ${file.name}`),
-      h('p', { class: 'muted' }, `지원 형식: ${SUPPORTED.join(', ')} (PDF·이미지는 아직 지원하지 않습니다)`))), [
-      h('button', { class: 'btn primary', type: 'button', onclick: () => { document.querySelector('.modal-overlay')?.remove(); this.pickFile(); } }, '다른 파일 선택'),
+      h('p', { class: 'muted' }, `지원 형식: ${SUPPORTED.join(', ')} (건물 외관 사진은 [4면 사진으로 3D 만들기] 기능을 이용해 주세요)`))), [
+      h('button', { class: 'btn', type: 'button', onclick: () => { document.querySelector('.modal-overlay')?.remove(); this.openPhotoStudio(); } }, icon('camera', 15), '4면 사진으로 3D 만들기'),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => { document.querySelector('.modal-overlay')?.remove(); this.pickFile(); } }, '다른 도면 선택'),
     ]);
   }
 
@@ -227,7 +246,7 @@ export class App {
   /* ───── 내보내기 ───── */
   openExport() {
     const b = this.viewport.build, p = store.project;
-    if (!p || !b) { toast('내보낼 모델이 없습니다. 먼저 도면을 열거나 예제를 불러오세요.', 'warn'); return; }
+    if (!p || !b) { toast('내보낼 모델이 없습니다. 먼저 도면을 열거나 4면 사진으로 모델을 생성하세요.', 'warn'); return; }
     let fmt: ExportFormat = 'ifc';
     const visibleOnly = h('input', { type: 'checkbox', checked: true });
     const hidden = store.ui.hiddenGroups.size;
@@ -263,31 +282,16 @@ export class App {
     openModal('도움말', h('div', { class: 'help-body' },
       h('h3', null, '작업 순서'),
       h('ol', null,
-        h('li', null, h('b', null, '도면 준비'), ' — DWG·DXF를 엽니다. 여러 장이 한 파일에 있으면 시트를 나눠 평면도를 찾습니다.'),
+        h('li', null, h('b', null, '도면 또는 4면 사진 준비'), ' — DWG·DXF를 열거나 [4면 사진] 버튼으로 전·후·좌·우 건물 사진을 지정 프레임에 맞춰 촬영·업로드합니다.'),
         h('li', null, h('b', null, '인식 검토'), ' — 노란 ! 표시 기둥은 확인이 필요합니다. 아래 "검증 결과"에서 눌러 위치로 이동합니다.'),
         h('li', null, h('b', null, '3D 생성'), ' — 격자와 기둥으로 지붕·보·벽을 자동으로 만듭니다.'),
-        h('li', null, h('b', null, '꾸미기·편집'), ' — 오른쪽 위 "꾸미기·설정"에서 색감, 지붕 형식, 높이를 바꿉니다.'),
+        h('li', null, h('b', null, '꾸미기·편집'), ' — 오른쪽 위 "꾸미기·설정"에서 사실적인 PBR 재질 프리셋, 지붕 형식, 높이를 바꿉니다.'),
         h('li', null, h('b', null, '내보내기'), ' — IFC(BIM), glTF(3D), DXF(평면), CSV(물량표).')),
       h('h3', null, '마우스'),
       term('도면', '휠: 확대·축소 · 끌기: 이동 · 클릭: 기둥/외벽 칸 선택'),
       term('3D', '끌기: 회전 · 오른쪽 끌기(또는 Shift): 이동 · 휠: 확대 · 클릭: 부재 선택'),
       h('h3', null, '단축키'),
       term('Ctrl+Z / Ctrl+Y', '실행 취소 / 다시 실행'), term('Delete', '선택한 기둥 삭제(확인 후)'), term('Esc', '도구 끝내기 · 선택 해제'), term('F', '도면 화면 맞춤'),
-      h('h3', null, '용어'),
-      term('인식 결과 수정 (HITL)', 'AI·규칙이 찾은 기둥이나 선을 사람이 확인하고 고치는 작업'),
-      term('주경 D', '기둥 굵기 비례를 정하는 기준 치수'),
-      term('앙곡 Hz', '처마 끝이 모서리로 갈수록 위로 휘어 올라가는 정도'),
-      term('안허리곡 Hy', '지붕을 위에서 볼 때 처마 가운데가 안으로 들어가고 귀가 밖으로 뻗는 정도'),
-      term('결구 유격 (Clearance)', '부재가 맞물릴 때 남기는 틈'),
-      term('구조 간섭 (Clash)', '부재끼리 겹치거나 부딪히는 상태'),
-      term('결구 구조 살펴보기', '부재를 분리해 내부 연결을 보는 분해도(Exploded View)'),
-      term('물량 명세서 (BOM)', '부재와 자재의 수량·규격 목록. 1재 ≈ 0.00334㎥'),
-      h('h3', null, '알아 두기'),
-      h('ul', null,
-        h('li', null, '인식은 주열 번호(X1, Y1…), 원·사각 기둥 도형, 실 이름, 창호 이름표, 입면도 높이 치수를 근거로 합니다. 근거가 없는 값은 "기본값"으로 표시됩니다.'),
-        h('li', null, '구조 검토는 전통 목구조 경험식에 따른 참고 판정이며 구조계산을 대신하지 않습니다.'),
-        h('li', null, '작업은 이 브라우저에만 자동 저장됩니다(서버로 전송하지 않음).'),
-        h('li', null, 'DWG 해석에는 LibreDWG(GPL-3.0)를 사용합니다.')),
     ), [h('button', { class: 'btn danger ghost', type: 'button', onclick: async () => {
       if (await confirmDialog('저장된 작업 지우기', '이 브라우저에 저장된 프로젝트와 도면을 지우고 처음 화면으로 돌아갑니다. 되돌릴 수 없습니다.', '지우기', true)) await this.resetAll();
     } }, icon('trash', 15), '저장된 작업 지우기')], { wide: true });
@@ -301,7 +305,7 @@ export class App {
     const warns = this.bottom.results.filter((c) => c.status === 'fail').length;
     const touched = !!p && (p.palette.id !== 'baekgol' || Object.keys(p.palette.custom).length > 0 || (Object.keys(p.params) as (keyof typeof p.params)[]).some((k) => p.params[k] !== p.baseline[k]));
     const steps = [
-      { label: '도면 준비', done: !!p, action: () => this.pickFile() },
+      { label: '도면·4면 사진', done: !!p, action: () => this.openPhotoStudio() },
       { label: '인식 검토', done: !!p && review === 0, action: () => store.setUI({ bottom: true, bottomTab: 'checks' }) },
       { label: '3D 생성', done: !!b, action: () => store.setUI({ layout: store.ui.layout === 'drawing' ? 'split' : store.ui.layout }) },
       { label: '꾸미기·편집', done: touched, action: () => { store.select(null); store.setUI({ drawer: true }); } },
@@ -325,6 +329,13 @@ export class App {
     const redo = iconBtn('redo', store.canRedo() ? `다시 실행: ${store.redoLabel()}` : '다시 실행', () => { const l = store.redo(); if (l) toast(`다시 실행: ${l}`); }, { shortcut: 'Ctrl+Y' });
     redo.disabled = !store.canRedo();
 
+    const photoBtn = h('button', {
+      class: 'btn photo-header-btn',
+      type: 'button',
+      'data-tip': '건물 4면[전·후·좌·우]을 지정 프레임으로 촬영해 3D 모델을 만듭니다',
+      onclick: () => this.openPhotoStudio(),
+    }, icon('camera', 16), h('span', { class: 'hide-md' }, '4면 사진 3D'));
+
     let primary: HTMLElement;
     if (!p) primary = h('button', { class: 'btn primary', type: 'button', onclick: () => this.pickFile() }, icon('upload', 16), h('span', null, '도면 열기'));
     else if (review) primary = h('button', { class: 'btn primary warn', type: 'button', onclick: () => store.setUI({ bottom: true, bottomTab: 'checks' }) }, icon('alert', 16), h('span', null, `검토할 항목 ${review}개`));
@@ -341,13 +352,14 @@ export class App {
       h('div', { class: 'actions' },
         layoutSeg,
         p ? h('div', { class: 'btn-group hide-sm' }, undo, redo) : null,
+        photoBtn,
         p ? h('button', { class: `btn ${store.ui.drawer ? 'active' : ''}`, type: 'button', 'aria-pressed': String(store.ui.drawer), 'data-tip': '색감·형태·높이 설정', onclick: () => { if (store.ui.drawer && !store.selection) store.setUI({ drawer: false }); else { store.select(null); store.setUI({ drawer: true }); } } }, icon('palette', 16), h('span', { class: 'hide-md' }, '꾸미기·설정')) : null,
         p ? iconBtn('upload', '다른 도면 열기', () => this.pickFile(), { cls: 'hide-sm' }) : null,
         primary,
         iconBtn('help', '도움말', () => this.openHelp()),
       ),
     );
-    document.title = p ? `${p.name} — HanokJIN` : 'HanokJIN — 한옥 도면 3D 모델링';
+    document.title = p ? `${p.name} — HanokJIN` : 'HanokJIN — 한옥 도면 & 4면 사진 3D 모델링';
   }
 
   private applyLayout() {
@@ -363,7 +375,6 @@ export class App {
     this.renderHeaderLight();
   }
 
-  /** 레이아웃만 바뀔 때 버튼 상태만 고친다 */
   private renderHeaderLight() {
     this.header.querySelectorAll<HTMLButtonElement>('.layout-seg .seg-btn').forEach((b, i) => {
       const id = (['drawing', 'split', 'model'] as const)[i];

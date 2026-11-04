@@ -1,8 +1,9 @@
 // 오른쪽 설정 서랍. 선택한 대상에 따라 '모델 설정' / '기둥 속성' / '외벽 칸' / '부재 정보'로 바뀐다.
+// 색감 탭의 팔레트 스와치와 재료 색 선택기는 단색 사각형 대신 나뭇결·기와골·석재 입자·빛의 입체 하이라이트가 반영된 사실적 PBR 재질 칩으로 렌더링한다.
 
 import type { MaterialKey, OpeningKind, Params, Pillar, Project } from '../core/types';
 import { CHOICES, CHEOK_MM, NUM_PARAMS, clampParam, type NumParamDef } from '../core/params';
-import { EDITABLE_MATERIALS, MATERIAL_LABEL, PALETTES, resolvePalette } from '../model/palettes';
+import { EDITABLE_MATERIALS, MATERIAL_LABEL, MATERIAL_SURFACE, PALETTES, resolvePalette } from '../model/palettes';
 import { computeFootprint } from '../model/footprint';
 import { store } from '../app/store';
 import { h, icon } from './dom';
@@ -67,7 +68,7 @@ export class Inspector {
   private modelPanel(p: Project) {
     const tab = store.ui.drawerTab;
     const tabs = h('div', { class: 'tabs', role: 'tablist' },
-      ...([['color', '색감', 'palette'], ['shape', '형태', 'home'], ['advanced', '고급', 'sliders']] as const).map(([id, label, ic]) =>
+      ...([['color', '색감·재질', 'palette'], ['shape', '형태', 'home'], ['advanced', '고급', 'sliders']] as const).map(([id, label, ic]) =>
         h('button', { class: `tab ${tab === id ? 'active' : ''}`, role: 'tab', 'aria-selected': String(tab === id), type: 'button', onclick: () => { store.ui.drawerTab = id; this.render(); } }, icon(ic, 15), label)));
     const content = tab === 'color' ? this.colorTab(p) : tab === 'shape' ? this.shapeTab(p) : this.advancedTab(p);
     return h('div', null, tabs, content);
@@ -76,8 +77,18 @@ export class Inspector {
   private colorTab(p: Project) {
     const cur = p.palette.id;
     const cards = PALETTES.map((pal) => {
-      const sw = (['pillar', 'beam', 'wall', 'roof', 'stone'] as MaterialKey[]).map((k) => h('span', { class: 'sw', style: `background:${pal.colors[k]}` }));
-      if (pal.accent) sw.push(h('span', { class: 'sw', style: `background:${pal.accent.band}` }), h('span', { class: 'sw', style: `background:${pal.accent.band2}` }));
+      const sw = (['pillar', 'beam', 'wall', 'roof', 'stone'] as MaterialKey[]).map((k) =>
+        h('span', {
+          class: `sw sw-${MATERIAL_SURFACE[k]}`,
+          style: `--sw-color:${pal.colors[k]}`,
+          title: `${MATERIAL_LABEL[k]} (${pal.colors[k]})`,
+        }));
+      if (pal.accent) {
+        sw.push(
+          h('span', { class: 'sw sw-wood', style: `--sw-color:${pal.accent.band}` }),
+          h('span', { class: 'sw sw-wood', style: `--sw-color:${pal.accent.band2}` }),
+        );
+      }
       return h('button', {
         class: `palette-card ${cur === pal.id ? 'active' : ''}`, type: 'button', 'aria-pressed': String(cur === pal.id),
         onclick: () => store.commit(`색감: ${pal.name}`, (q) => { q.palette = { id: pal.id, custom: {} }; }, 'palette'),
@@ -85,21 +96,36 @@ export class Inspector {
     });
     const colors = resolvePalette(p.palette).colors;
     const pickers = EDITABLE_MATERIALS.map((k) => {
+      const surf = MATERIAL_SURFACE[k];
+      const sphere = h('span', { class: `mat-sphere mat-${surf}`, style: `--mat-color:${colors[k]}` });
       const input = h('input', { type: 'color', value: colors[k], 'aria-label': `${MATERIAL_LABEL[k]} 색` });
-      input.addEventListener('input', () => store.preview((q) => { q.palette.custom[k] = input.value; }, 'palette'));
+      input.addEventListener('input', () => {
+        sphere.style.setProperty('--mat-color', input.value);
+        store.preview((q) => { q.palette.custom[k] = input.value; }, 'palette');
+      });
       input.addEventListener('change', () => {
         const v = input.value;
+        sphere.style.setProperty('--mat-color', v);
         store.preview((q) => { delete q.palette.custom[k]; }, 'palette');
         store.commit(`${MATERIAL_LABEL[k]} 색 변경`, (q) => { q.palette.custom[k] = v; }, 'palette');
       });
-      return h('label', { class: 'color-row' }, input, h('span', null, MATERIAL_LABEL[k]), p.palette.custom[k] ? h('span', { class: 'badge user' }, '직접') : null);
+      return h('label', { class: 'color-row pbr-color-row' },
+        h('span', { class: 'mat-picker-wrap' }, sphere, input),
+        h('span', { class: 'mat-label-wrap' },
+          h('b', null, MATERIAL_LABEL[k]),
+          h('span', { class: 'muted mat-surf-tag' }, { wood: '소나무 결·음영', tile: '암수키와 골·윤기', plaster: '회벽·황토 미장', stone: '화강암·장대석', paper: '닥나무 한지·투광' }[surf]),
+        ),
+        p.palette.custom[k] ? h('span', { class: 'badge user' }, '직접') : null);
     });
     return h('div', null,
-      h('div', { class: 'section' }, h('div', { class: 'section-title' }, '색감 고르기'), h('div', { class: 'palette-grid' }, ...cards)),
       h('div', { class: 'section' },
-        h('div', { class: 'section-title' }, '재료 색 직접 고르기', Object.keys(p.palette.custom).length
+        h('div', { class: 'section-title' }, '사실적 전통 재질 프리셋 (PBR)'),
+        h('p', { class: 'hint' }, '단색이 아닌 나뭇결·기와 골·화강암 입자·창호지 투광과 태양광 방향을 반영합니다.'),
+        h('div', { class: 'palette-grid' }, ...cards)),
+      h('div', { class: 'section' },
+        h('div', { class: 'section-title' }, '부재별 재질 색감 미세조정', Object.keys(p.palette.custom).length
           ? h('button', { class: 'btn ghost sm', type: 'button', onclick: () => store.commit('재료 색 초기화', (q) => { q.palette.custom = {}; }, 'palette') }, '초기화') : null),
-        h('div', { class: 'color-grid' }, ...pickers)),
+        h('div', { class: 'color-grid pbr-grid' }, ...pickers)),
     );
   }
 
@@ -129,14 +155,14 @@ export class Inspector {
     return h('div', null,
       ...NUM_PARAMS.filter((d) => !d.basic).map((d) => this.numRow(p, d)),
       h('div', { class: 'section' },
-        h('div', { class: 'section-title' }, '도면 값으로 되돌리기'),
-        h('p', { class: 'hint' }, changed.length ? `바꾼 항목 ${changed.length}개를 ${p.demo ? '예제' : '도면 인식'} 직후 값으로 되돌립니다.` : '바꾼 값이 없습니다.'),
+        h('div', { class: 'section-title' }, '도면·촬영 초기값으로 되돌리기'),
+        h('p', { class: 'hint' }, changed.length ? `바꾼 항목 ${changed.length}개를 초기 인식 값으로 되돌립니다.` : '바꾼 값이 없습니다.'),
         h('button', { class: 'btn', type: 'button', disabled: !changed.length, onclick: () => store.commit('모든 값 되돌리기', (q) => { q.params = { ...q.baseline }; }, 'params') }, icon('reset', 15), '되돌리기')),
       h('div', { class: 'section' },
-        h('div', { class: 'section-title' }, p.demo ? '예제 정보' : '도면 인식 정보'),
+        h('div', { class: 'section-title' }, p.demo ? '예제 정보' : '모델 인식·복원 정보'),
         h('div', { class: 'kv' }, h('span', null, '원본'), h('b', null, p.source.fileName ?? '-')),
         h('div', { class: 'kv' }, h('span', null, '형식'), h('b', null, p.source.format ?? '-')),
-        p.source.area ? h('div', { class: 'kv' }, h('span', null, '건축 면적(도면 표기)'), h('b', null, p.source.area)) : null,
+        p.source.area ? h('div', { class: 'kv' }, h('span', null, '건축 면적'), h('b', null, p.source.area)) : null,
         h('ul', { class: 'notes' }, ...p.recognitionNotes.map((n) => h('li', null, n))),
         p.members.length ? h('div', { class: 'kv' }, h('span', null, '도면 부재 표기'), h('b', null, p.members.map((m) => `${m.name} ${m.w}×${m.h}`).join(', '))) : null),
     );
@@ -198,7 +224,7 @@ export class Inspector {
     return h('div', null,
       h('div', { class: 'section' },
         h('div', { class: 'pillar-head' }, h('span', { class: `dot ${pl.review ? 'warn' : pl.source === 'user' ? 'user' : 'ok'}` }), h('b', null, pl.id), h('span', { class: 'muted' }, ROLE[role])),
-        h('div', { class: 'kv' }, h('span', null, '출처'), h('b', null, pl.source === 'user' ? '직접 입력·수정' : `도면 인식 (신뢰도 ${Math.round(pl.confidence * 100)}%)`)),
+        h('div', { class: 'kv' }, h('span', null, '출처'), h('b', null, pl.source === 'user' ? '직접 입력·수정' : `인식 완료 (신뢰도 ${Math.round(pl.confidence * 100)}%)`)),
         pl.review ? h('div', { class: 'callout warn' }, icon('alert', 16), h('div', null, h('b', null, '확인이 필요합니다'), h('p', null, pl.review),
           h('button', { class: 'btn sm', type: 'button', onclick: () => store.commit(`기둥 ${pl.id} 확인`, (q) => { const t = q.pillars.find((z) => z.id === pl.id); if (t) { delete t.review; t.confidence = Math.max(t.confidence, 0.9); } }) }, icon('check', 14), '맞습니다'))) : null),
       h('div', { class: 'section' },
@@ -229,8 +255,8 @@ export class Inspector {
     return h('div', null,
       h('div', { class: 'section' },
         h('div', { class: 'kv' }, h('span', null, '칸 너비'), h('b', null, `${Math.round(len).toLocaleString()} mm (${(len / CHEOK_MM).toFixed(1)}척)`)),
-        op?.label ? h('div', { class: 'kv' }, h('span', null, '도면 표기'), h('b', null, op.label)) : null,
-        h('div', { class: 'kv' }, h('span', null, '출처'), h('b', null, op ? (op.source === 'user' ? '직접 지정' : '도면 인식') : '창호 표기 없음(벽)'))),
+        op?.label ? h('div', { class: 'kv' }, h('span', null, '표기'), h('b', null, op.label)) : null,
+        h('div', { class: 'kv' }, h('span', null, '출처'), h('b', null, op ? (op.source === 'user' ? '직접 지정' : '인식됨') : '창호 표기 없음(벽)'))),
       h('div', { class: 'section' },
         h('div', { class: 'section-title' }, '이 칸 채우기'),
         h('div', { class: 'seg' }, ...([['wall', '흙벽'], ['window', '창호'], ['door', '문']] as const).map(([k, label]) =>
@@ -241,12 +267,11 @@ export class Inspector {
   }
 }
 
-/** 출처 표시: 인식 직후 값과 다르면 '수정함', 같으면 인식 때의 출처(도면/기본값) */
 function sourceBadge(p: Project, key: keyof Params) {
   const s = p.paramSource[key];
   if (p.params[key] !== p.baseline[key]) return h('span', { class: 'badge user', 'data-tip': `직접 바꾼 값입니다 (처음 값: ${p.baseline[key]})` }, '수정함');
-  if (s?.source === 'drawing') return h('span', { class: 'badge drawing', 'data-tip': s.note ?? '도면에서 읽은 값입니다' }, '도면');
-  return h('span', { class: 'badge default', 'data-tip': p.demo ? '예제 값입니다' : '도면에서 찾지 못해 기본 비례로 정한 값입니다' }, p.demo ? '예제' : '기본값');
+  if (s?.source === 'drawing') return h('span', { class: 'badge drawing', 'data-tip': s.note ?? '도면/사진에서 읽은 값입니다' }, '인식값');
+  return h('span', { class: 'badge default', 'data-tip': p.demo ? '예제 값입니다' : '기본 비례로 정한 값입니다' }, p.demo ? '예제' : '기본값');
 }
 
 const SVGNS = 'http://www.w3.org/2000/svg';

@@ -1,4 +1,5 @@
-// 3D 보기: 낮 하늘 조명, 궤도 카메라, 시점 프리셋, 부재 선택, 결구 살펴보기(분해), 단면.
+// 3D 보기: 절차적 HDRI 환경광(PMREM), 시간대별 자연광 조명 프리셋(맑은 한낮·아침·노을·흐린 날),
+// 처마 밑 간접 반사광(Bounce Light), 궤도 카메라, 시점 프리셋, 부재 선택, 결구 살펴보기(분해), 단면.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -16,13 +17,69 @@ const PRESETS: { id: string; label: string; az: number; el: number; dist: number
   { id: 'top', label: '지붕 위', az: 0, el: 89, dist: 1.0 },
 ];
 
+export type LightMoodId = 'noon' | 'morning' | 'sunset' | 'overcast';
+
+interface LightMood {
+  id: LightMoodId;
+  label: string;
+  skyTop: string;
+  skyMid: string;
+  skyBot: string;
+  fog: number;
+  sunColor: number;
+  sunIntensity: number;
+  sunAz: number; // 라디안
+  sunEl: number;
+  hemiSky: number;
+  hemiGround: number;
+  hemiIntensity: number;
+  bounceColor: number;
+  bounceIntensity: number;
+  exposure: number;
+}
+
+const LIGHT_MOODS: LightMood[] = [
+  {
+    id: 'noon', label: '맑은 한낮',
+    skyTop: '#7caee0', skyMid: '#c8def2', skyBot: '#ece5d8', fog: 0xe8e2d6,
+    sunColor: 0xfff5e4, sunIntensity: 2.75, sunAz: -0.65, sunEl: 1.05,
+    hemiSky: 0xdcebf7, hemiGround: 0xa89274, hemiIntensity: 1.15,
+    bounceColor: 0xffe4bc, bounceIntensity: 0.65, exposure: 1.08,
+  },
+  {
+    id: 'morning', label: '아침 햇살',
+    skyTop: '#6d9fd4', skyMid: '#cbe0f0', skyBot: '#f5e4cf', fog: 0xeee2d3,
+    sunColor: 0xffdfba, sunIntensity: 2.5, sunAz: 0.85, sunEl: 0.58,
+    hemiSky: 0xd5e6f5, hemiGround: 0x9c866b, hemiIntensity: 1.05,
+    bounceColor: 0xffd5a8, bounceIntensity: 0.6, exposure: 1.05,
+  },
+  {
+    id: 'sunset', label: '석양 노을',
+    skyTop: '#4c5f8a', skyMid: '#c97b63', skyBot: '#f5be8a', fog: 0xe6bea0,
+    sunColor: 0xff9e5e, sunIntensity: 2.8, sunAz: -1.15, sunEl: 0.36,
+    hemiSky: 0xd49b82, hemiGround: 0x7d5840, hemiIntensity: 0.95,
+    bounceColor: 0xffad75, bounceIntensity: 0.72, exposure: 1.04,
+  },
+  {
+    id: 'overcast', label: '차분한 흐린 날',
+    skyTop: '#9aaaba', skyMid: '#cbd4dc', skyBot: '#e4e2dc', fog: 0xe2e0da,
+    sunColor: 0xf4f6f8, sunIntensity: 1.35, sunAz: -0.4, sunEl: 1.15,
+    hemiSky: 0xe2e8f0, hemiGround: 0x9e978b, hemiIntensity: 1.55,
+    bounceColor: 0xe8dfd1, bounceIntensity: 0.5, exposure: 1.12,
+  },
+];
+
 export class Viewport {
   readonly el: HTMLElement;
   private renderer: THREE.WebGLRenderer | null = null;
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(40, 1, 0.1, 500);
   private controls: OrbitControls | null = null;
-  private sun = new THREE.DirectionalLight(0xfff4e0, 2.4);
+  private sun = new THREE.DirectionalLight(0xfff5e4, 2.75);
+  private hemi = new THREE.HemisphereLight(0xdcebf7, 0xa89274, 1.15);
+  private bounce = new THREE.DirectionalLight(0xffe4bc, 0.65);
+  private rim = new THREE.DirectionalLight(0xdbeafe, 0.42);
+  private moodId: LightMoodId = 'noon';
   private mats: MaterialSet = createMaterials();
   build: Build | null = null;
   private holder = new THREE.Group();
@@ -44,13 +101,21 @@ export class Viewport {
     this.explodeLabel = h('div', { class: 'explode-desc' });
     const presetBar = h('div', { class: 'preset-bar', role: 'toolbar', 'aria-label': '시점' },
       ...PRESETS.map((p) => h('button', { class: 'chip', type: 'button', onclick: () => this.preset(p.id) }, p.label)));
+
+    const moodSel = h('select', {
+      class: 'select sm mood-select',
+      'aria-label': '조명 시간대',
+      'data-tip': '태양 각도와 하늘빛·간접광을 바꿔 재질 색감을 확인합니다',
+      onchange: (e: Event) => this.setLightMood((e.target as HTMLSelectElement).value as LightMoodId),
+    }, ...LIGHT_MOODS.map((m) => h('option', { value: m.id }, `조명: ${m.label}`)));
+
     const treePop = h('div', { class: 'popover tree-pop', hidden: true });
     const treeBtn = h('button', { class: 'btn sm', type: 'button', 'aria-label': '구조 보기', 'data-tip': '부재 묶음 보이기·숨기기', onclick: (e: MouseEvent) => { e.stopPropagation(); treePop.hidden = !treePop.hidden; if (!treePop.hidden) this.renderTree(treePop); } }, icon('tree', 15), h('span', null, '구조 보기'));
     document.addEventListener('click', (e) => { if (!treePop.contains(e.target as Node)) treePop.hidden = true; });
     const toolbar = h('div', { class: 'pane-toolbar' },
       h('div', { class: 'pane-title' }, icon('cube', 16), h('span', null, '3D 모델')),
       presetBar,
-      h('div', { class: 'pop-anchor right' }, treeBtn, treePop),
+      h('div', { class: 'pop-anchor right' }, moodSel, treeBtn, treePop),
     );
     this.el = h('section', { class: 'pane model-pane', 'aria-label': '3D 모델 창' }, toolbar,
       h('div', { class: 'canvas-wrap three-wrap' }), this.info,
@@ -69,7 +134,7 @@ export class Viewport {
     r.shadowMap.enabled = true;
     r.shadowMap.type = THREE.PCFSoftShadowMap;
     r.toneMapping = THREE.ACESFilmicToneMapping;
-    r.toneMappingExposure = 1.05;
+    r.toneMappingExposure = 1.08;
     r.outputColorSpace = THREE.SRGBColorSpace;
     r.localClippingEnabled = true;
     this.el.querySelector('.three-wrap')!.append(r.domElement);
@@ -91,42 +156,119 @@ export class Viewport {
     store.on('selection', () => this.syncSelection());
   }
 
-  /* ───── 장면 ───── */
+  /* ───── 장면 및 PBR 환경광(IBL) ───── */
   private setupScene() {
-    const sky = document.createElement('canvas');
-    sky.width = 2; sky.height = 256;
-    const g = sky.getContext('2d')!;
-    const grad = g.createLinearGradient(0, 0, 0, 256);
-    grad.addColorStop(0, '#9fc3e6'); grad.addColorStop(0.55, '#dbe7f1'); grad.addColorStop(1, '#efe9de');
-    g.fillStyle = grad; g.fillRect(0, 0, 2, 256);
-    const skyTex = new THREE.CanvasTexture(sky);
-    skyTex.colorSpace = THREE.SRGBColorSpace;
-    this.scene.background = skyTex;
-    this.scene.fog = new THREE.Fog(0xe9e5dc, 80, 220);
-
-    this.scene.add(new THREE.HemisphereLight(0xdfeaf5, 0x9a8b70, 1.15));
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
-    this.sun.shadow.bias = -0.0004;
-    this.sun.shadow.normalBias = 0.03;
-    this.scene.add(this.sun, this.sun.target);
+    this.sun.shadow.bias = -0.00035;
+    this.sun.shadow.normalBias = 0.025;
+    // 마당 백토에서 처마 밑으로 반사되는 따뜻한 간접광(서까래·공포의 입체감을 살림)
+    this.bounce.castShadow = false;
+    this.rim.castShadow = false;
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.bounce, this.bounce.target, this.rim, this.rim.target);
 
     const gTex = this.mats.ground.map;
-    if (gTex) gTex.repeat.set(40, 40);
+    if (gTex) gTex.repeat.set(42, 42);
+    if (this.mats.ground.bumpMap) this.mats.ground.bumpMap.repeat.set(42, 42);
     this.ground = new THREE.Mesh(new THREE.CircleGeometry(120, 64), this.mats.ground);
     this.ground.rotation.x = -Math.PI / 2;
     this.ground.position.y = -0.005;
     this.ground.receiveShadow = true;
     this.scene.add(this.ground, this.holder);
+
+    this.setLightMood('noon');
+  }
+
+  /** 시간대별 하늘 배경 + PMREM 절차적 환경맵(IBL) + 태양/반사광 설정 */
+  setLightMood(id: LightMoodId) {
+    this.moodId = id;
+    const m = LIGHT_MOODS.find((x) => x.id === id) ?? LIGHT_MOODS[0];
+
+    // 1) 하늘 배경 및 Equirectangular 환경 텍스처 생성
+    const envCanvas = document.createElement('canvas');
+    envCanvas.width = 512; envCanvas.height = 256;
+    const g = envCanvas.getContext('2d')!;
+    const grad = g.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0.00, m.skyTop);
+    grad.addColorStop(0.48, m.skyMid);
+    grad.addColorStop(0.52, m.skyBot);
+    grad.addColorStop(0.56, '#c8beae'); // 지평선 아래 마당 반사광
+    grad.addColorStop(1.00, '#8f8270');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 512, 256);
+
+    // 태양 글로우 스팟을 환경맵에 그려 기와와 마루에 자연스러운 스페큘러 하이라이트 형성
+    const sx = ((m.sunAz + Math.PI) / (Math.PI * 2)) * 512;
+    const sy = (1 - (m.sunEl / (Math.PI / 2))) * 128;
+    const sunGlow = g.createRadialGradient(sx, sy, 2, sx, sy, 68);
+    sunGlow.addColorStop(0, 'rgba(255,250,235,0.95)');
+    sunGlow.addColorStop(0.3, 'rgba(255,235,200,0.35)');
+    sunGlow.addColorStop(1, 'rgba(255,235,200,0)');
+    g.fillStyle = sunGlow;
+    g.fillRect(0, 0, 512, 140);
+
+    const skyCanvas = document.createElement('canvas');
+    skyCanvas.width = 2; skyCanvas.height = 256;
+    const sg = skyCanvas.getContext('2d')!;
+    const sGrad = sg.createLinearGradient(0, 0, 0, 256);
+    sGrad.addColorStop(0, m.skyTop);
+    sGrad.addColorStop(0.55, m.skyMid);
+    sGrad.addColorStop(1, m.skyBot);
+    sg.fillStyle = sGrad;
+    sg.fillRect(0, 0, 2, 256);
+    const skyTex = new THREE.CanvasTexture(skyCanvas);
+    skyTex.colorSpace = THREE.SRGBColorSpace;
+    this.scene.background = skyTex;
+    this.scene.fog = new THREE.Fog(m.fog, 75, 210);
+
+    if (this.renderer) {
+      this.renderer.toneMappingExposure = m.exposure;
+      try {
+        const envTex = new THREE.CanvasTexture(envCanvas);
+        envTex.mapping = THREE.EquirectangularReflectionMapping;
+        envTex.colorSpace = THREE.SRGBColorSpace;
+        const pmrem = new THREE.PMREMGenerator(this.renderer);
+        const rt = pmrem.fromEquirectangular(envTex);
+        this.scene.environment = rt.texture;
+        envTex.dispose();
+        pmrem.dispose();
+      } catch {
+        // 일부 제한된 WebGL 환경에서는 기본 조명만 사용
+      }
+    }
+
+    this.sun.color.setHex(m.sunColor);
+    this.sun.intensity = m.sunIntensity;
+    this.hemi.color.setHex(m.hemiSky);
+    this.hemi.groundColor.setHex(m.hemiGround);
+    this.hemi.intensity = m.hemiIntensity;
+    this.bounce.color.setHex(m.bounceColor);
+    this.bounce.intensity = m.bounceIntensity;
+
+    if (this.build) this.fitLights(this.build.bounds);
+    this.request();
   }
 
   private fitLights(b: THREE.Box3) {
+    const m = LIGHT_MOODS.find((x) => x.id === this.moodId) ?? LIGHT_MOODS[0];
     const c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3());
-    const R = Math.max(s.x, s.z, 6) * 0.9;
-    this.sun.position.set(c.x - R * 0.9, R * 1.6, c.z + R * 1.1);
+    const R = Math.max(s.x, s.z, 6) * 0.95;
+    const dist = R * 2.1;
+    this.sun.position.set(
+      c.x + dist * Math.cos(m.sunEl) * Math.sin(m.sunAz),
+      c.y + dist * Math.sin(m.sunEl),
+      c.z + dist * Math.cos(m.sunEl) * Math.cos(m.sunAz),
+    );
     this.sun.target.position.copy(c);
+    // 처마 밑을 아래에서 위로 비추는 마당 반사광(Bounce Light)
+    this.bounce.position.set(c.x + R * 0.6, -R * 0.55, c.z + R * 0.8);
+    this.bounce.target.position.set(c.x, c.y + s.y * 0.3, c.z);
+    // 반대편 외곽 윤곽을 살리는 보조광(Rim Light)
+    this.rim.position.set(c.x - this.sun.position.x * 0.6, R * 1.1, c.z - this.sun.position.z * 0.6);
+    this.rim.target.position.copy(c);
+
     const cam = this.sun.shadow.camera;
-    cam.left = -R * 1.3; cam.right = R * 1.3; cam.top = R * 1.3; cam.bottom = -R * 1.3; cam.near = 0.5; cam.far = R * 5;
+    cam.left = -R * 1.35; cam.right = R * 1.35; cam.top = R * 1.35; cam.bottom = -R * 1.35; cam.near = 0.5; cam.far = R * 5.5;
     cam.updateProjectionMatrix();
   }
 
@@ -176,7 +318,6 @@ export class Viewport {
     const g = GROUPS[stage];
     this.explodeLabel.textContent = u.explode > 0.001 ? `${stage + 1}/${GROUPS.length}단계 ${g.label} — ${g.desc}` : '';
     if (this.explodeInput && document.activeElement !== this.explodeInput) this.explodeInput.value = String(Math.round(u.explode * 100));
-    // 단면: 모델 재질에만 적용(마당은 자르지 않음)
     const b = this.build.bounds;
     const s = u.section;
     const on = s.axis !== 'none';
@@ -207,8 +348,7 @@ export class Viewport {
     const b = this.build.bounds;
     const c = b.getCenter(new THREE.Vector3());
     const size = b.getSize(new THREE.Vector3());
-    const radius = size.length() * 0.5;   // 경계 구 반지름: 어느 방향에서 봐도 잘리지 않는다
-    // 세로·가로 화각 중 좁은 쪽에 맞춘다(나란히 보기처럼 좁은 창에서도 집 전체가 보이게).
+    const radius = size.length() * 0.5;
     const vf = (this.camera.fov * Math.PI) / 180;
     const hf = 2 * Math.atan(Math.tan(vf / 2) * this.camera.aspect);
     const dist = (radius / Math.sin(Math.min(vf, hf) / 2)) * 0.92 * p.dist;
@@ -219,10 +359,8 @@ export class Viewport {
     this.moveCamera(pos, target, animate);
   }
 
-  /** 창 크기를 다시 재고 집 전체가 보이게 맞춘다 */
   fitView() { this.resize(); this.preset('bird', false); }
 
-  /** 월드 좌표 점을 가까이서 보기 */
   focusPoint(p: THREE.Vector3, dist = 6) {
     if (!this.controls) return;
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
@@ -310,7 +448,6 @@ export class Viewport {
     play.onclick = () => {
       if (this.playing) { this.stopPlay(); return; }
       play.replaceChildren(icon('pause', 16));
-      // 다 벌려 놓은 상태에서 기단부터 지붕까지 차례로 맞춰 내려온다.
       const start = performance.now();
       const tick = () => {
         const t = (performance.now() - start) / 7000;
@@ -370,7 +507,6 @@ export class Viewport {
     if (again) this.request();
   }
 
-  /** 내보내기 전에 분해·단면을 잠시 풀었다가 되돌린다. */
   async withCleanState<T>(fn: () => Promise<T>): Promise<T> {
     const prev = store.ui.explode;
     if (this.build) for (const g of GROUPS) this.build.groups[g.key].position.y = 0;
