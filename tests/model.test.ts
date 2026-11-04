@@ -54,7 +54,8 @@ describe('3D 모델 생성', () => {
     expect(ifc).toContain("FILE_SCHEMA(('IFC4'));");
     expect((ifc.match(/=IFCCOLUMN\(/g) ?? []).length).toBeGreaterThanOrEqual(project.pillars.length);
     expect((ifc.match(/=IFCTRIANGULATEDFACESET\(/g) ?? []).length).toBeGreaterThan(100);
-    expect(ifc).not.toMatch(/NaN|Infinity/);
+    // GUID 등 따옴표 문자열은 무작위라 'NaN'이 우연히 섞일 수 있으므로 수치 부분만 검사한다.
+    expect(ifc.replace(/'[^']*'/g, "''")).not.toMatch(/NaN|Infinity/);
     expect(stepString("대청's")).toBe("'\\X2\\B300CCAD\\X0\\''s'");
   });
 
