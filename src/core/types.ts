@@ -24,7 +24,7 @@ export interface CadDim { layer: string; ax: number; ay: number; bx: number; by:
 
 export interface CadDoc {
   fileName: string;
-  format: 'DWG' | 'DXF' | 'DEMO';
+  format: 'DWG' | 'DXF' | 'MODEL';
   version: string;
   unitScale: number;                       // 원본 단위 → mm 배율(정규화 시 이미 적용됨)
   layers: CadLayer[];
@@ -96,7 +96,6 @@ export interface Project {
   version: 3;
   id: string;
   name: string;
-  demo: boolean;
   source: { fileName?: string; format?: string; sheetId?: string; area?: string };
   /** 평면도에서 X1·Y1 교차점의 CAD 좌표(도면 위 오버레이 정렬용) */
   origin: { x: number; y: number };
@@ -112,6 +111,8 @@ export interface Project {
   palette: PaletteState;
   recognitionNotes: string[];
   reviewed: boolean;
+  /** 부재별 손상 조사 기록 */
+  damages: DamageRecord[];
 }
 
 /* ───────────── 3D 결과에서 뽑는 정보 ───────────── */
@@ -128,4 +129,33 @@ export type CheckStatus = 'pass' | 'warn' | 'fail' | 'info';
 export interface CheckResult {
   id: string; status: CheckStatus; title: string; detail: string;
   focus?: { pillarId?: string; x?: number; y?: number };
+}
+
+/* ───────────── 손상 조사 ───────────── */
+
+/** 손상 기록을 붙인 대상. 기둥은 개별 부재, 그 밖의 부재는 부재 종류(이름) 단위로 붙인다. */
+export type DamageTarget =
+  | { kind: 'pillar'; id: string }
+  | { kind: 'part'; name: string }
+  | { kind: 'other'; name: string };
+
+export type DamageSeverity = 'minor' | 'moderate' | 'severe';
+
+/** 사진 위 손상 영역. 좌표는 사진 크기에 대한 0~1 비율, cls는 표준 손상 클래스 번호 */
+export interface DamageBox { x: number; y: number; w: number; h: number; cls: number }
+
+export interface DamagePhoto { id: string; name: string; w: number; h: number }
+
+export interface DamageRecord {
+  id: string;
+  target: DamageTarget;
+  location: string;          // 부재 안 위치(예: 정면 하부, 초석 맞닿는 부위)
+  rawTerm: string;           // 기존 보고서·현장 메모 표기
+  cls: number;               // 표준 손상 클래스(0~13)
+  severity: DamageSeverity;
+  statement: string;         // 보존사항 조사내용 문구
+  status: 'draft' | 'verified';
+  photo?: DamagePhoto;
+  boxes: DamageBox[];
+  surveyedAt: string;        // YYYY-MM-DD
 }

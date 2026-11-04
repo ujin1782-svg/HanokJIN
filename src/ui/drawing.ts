@@ -4,6 +4,7 @@ import type { Bounds, CadDoc, Pillar, Sheet } from '../core/types';
 import { CHEOK_MM } from '../core/params';
 import { computeFootprint, nearestIndex, type Footprint } from '../model/footprint';
 import { store } from '../app/store';
+import { pillarSeverity } from '../damage/records';
 import { h, icon } from './dom';
 import { sheetLabel } from '../cad/sheets';
 
@@ -71,6 +72,7 @@ export class DrawingView {
     store.on('cad', () => { this.paths.clear(); this.pathsFor = ''; this.fitted = ''; this.refreshSheets(); this.request(); });
     store.on('project', () => { this.fp = null; this.request(); });
     store.on('selection', () => this.request());
+    store.on('damage', () => this.request());
     store.on('ui', () => { this.syncTools(); this.request(); });
     this.refreshSheets();
   }
@@ -408,6 +410,9 @@ export class DrawingView {
     if (store.ui.overlay.pillars) {
       const fp = this.footprint()!;
       const used = new Set([...fp.at.values()].map((q) => q.id));
+      const sev = store.ui.mode === 'survey' ? pillarSeverity(p) : new Map();
+      const counts = new Map<string, number>();
+      for (const d of p.damages) if (d.target.kind === 'pillar') counts.set(d.target.id, (counts.get(d.target.id) ?? 0) + 1);
       for (const pl of p.pillars) {
         const [sx, sy] = S(pl.x, pl.y);
         const r = Math.max(5, (pl.size / 2) * this.s);
@@ -428,6 +433,15 @@ export class DrawingView {
           ctx.fillStyle = v('--warn'); ctx.beginPath(); ctx.arc(sx + r + 2, sy - r - 2, 7, 0, Math.PI * 2); ctx.fill();
           ctx.fillStyle = '#fff'; ctx.font = '800 10px var(--font)'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
           ctx.fillText('!', sx + r + 2, sy - r - 1.5); ctx.textBaseline = 'alphabetic';
+        }
+        const level = sev.get(pl.id);
+        if (level) {
+          // 손상 조사 모드: 기둥 아래쪽에 손상 정도 색과 기록 수
+          const bx = sx + r + 2, by = sy + r + 2;
+          ctx.fillStyle = v(`--sev-${level}`); ctx.strokeStyle = v('--paper'); ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = '#fff'; ctx.font = '700 10px var(--font)'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(String(counts.get(pl.id) ?? ''), bx, by + 0.5); ctx.textBaseline = 'alphabetic';
         }
       }
     }

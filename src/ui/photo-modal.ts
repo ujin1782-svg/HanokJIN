@@ -1,16 +1,13 @@
 // 4면 [전·후·좌·우] 지정 프레임 촬영 및 3D 한옥 모델 생성 대화상자 UI.
-// 사용자는 각 면(정면·배면·좌측면·우측면)을 웹캠/모바일 카메라로 지정 프레임에 맞춰 촬영하거나,
-// 사진을 올리거나, 4면 샘플 사진으로 즉시 테스트할 수 있다.
+// 사용자는 각 면(정면·배면·좌측면·우측면)을 웹캠/모바일 카메라로 지정 프레임에 맞춰 촬영하거나 사진을 올린다.
 // 캔버스 위에서 지정 프레임 기준선(용마루·처마·기단·지면·좌우 귀기둥)을 드래그해 보정할 수 있다.
 
 import type { CadDoc, Project, RoofType, Sheet } from '../core/types';
 import {
   analyzeFacePhoto,
   buildProjectFromFourViews,
-  createDefaultGuide,
   createInitialSlots,
   FACE_META,
-  generateSampleFourViews,
   type FaceKey,
   type FacePhotoSlot,
   type PhotoModelingOptions,
@@ -44,7 +41,7 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
   const videoEl = h('video', { class: 'photo-video', autoplay: true, playsinline: true, muted: true, hidden: true });
   const bayEditorWrap = h('div', { class: 'photo-bay-editor' });
   const summaryBox = h('div', { class: 'photo-summary-box' });
-  const statusBadge = h('span', { class: 'badge demo' }, '0 / 4면 완료');
+  const statusBadge = h('span', { class: 'badge default' }, '0 / 4면 완료');
 
   const stopCamera = () => {
     if (stream) {
@@ -85,15 +82,6 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
   const uploadBtn = h('button', { class: 'btn sm', type: 'button', onclick: () => fileInput.click() },
     icon('upload', 16), h('span', null, '이 면 사진 올리기'));
 
-  const sampleSelect = h('select', { class: 'select sm', 'aria-label': '4면 샘플 선택' },
-    h('option', { value: 'paljak-5kan' }, '샘플 1: 정면 5칸 팔작 한옥 (4면 세트)'),
-    h('option', { value: 'dancheong-3kan' }, '샘플 2: 궁궐 단청 3칸 한옥 (4면 세트)'),
-    h('option', { value: 'matbae-3kan' }, '샘플 3: 고택 맞배 3칸 민가 (4면 세트)'),
-  );
-
-  const loadSampleBtn = h('button', { class: 'btn sm', type: 'button', onclick: () => void loadSampleSet(sampleSelect.value as 'paljak-5kan') },
-    icon('sparkle', 15), h('span', null, '4면 샘플 채우기'));
-
   async function toggleCamera() {
     if (cameraOn) {
       stopCamera();
@@ -109,7 +97,7 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
       camBtn.replaceChildren(icon('x', 16), h('span', null, '카메라 끄기'));
       requestAnimationFrame(renderLiveCameraFrame);
     } catch {
-      toast('카메라 접근 권한이 없거나 지원되지 않는 환경입니다. [이 면 사진 올리기] 또는 [4면 샘플 채우기]를 이용해 주세요.', 'warn');
+      toast('카메라 접근 권한이 없거나 지원되지 않는 환경입니다. [이 면 사진 올리기]를 이용해 주세요.', 'warn');
     }
   }
 
@@ -135,40 +123,6 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
     if (nextFace) activeFace = nextFace;
     refreshUI();
     toast('지정 프레임으로 촬영 및 비례 분석을 완료했습니다.', 'ok');
-  }
-
-  async function loadSampleSet(preset: 'paljak-5kan' | 'matbae-3kan' | 'dancheong-3kan') {
-    stopCamera();
-    const views = generateSampleFourViews(preset);
-    if (preset === 'matbae-3kan') {
-      opts.roofType = 'matbae';
-      opts.refSpanMm = 7800;
-      opts.projectName = '고택 3칸 맞배 민가 (4면 복원)';
-    } else if (preset === 'dancheong-3kan') {
-      opts.roofType = 'paljak';
-      opts.refSpanMm = 9600;
-      opts.projectName = '단청 3칸 팔작 한옥 (4면 복원)';
-    } else {
-      opts.roofType = 'paljak';
-      opts.refSpanMm = 13800;
-      opts.projectName = '정면 5칸 팔작 한옥 (4면 복원)';
-    }
-
-    for (const fk of ['front', 'rear', 'left', 'right'] as FaceKey[]) {
-      slots[fk].guide = createDefaultGuide(fk);
-      if (preset === 'paljak-5kan' && (fk === 'front' || fk === 'rear')) {
-        slots[fk].guide.bays = 5;
-        slots[fk].guide.bayTypes = fk === 'front' ? ['window', 'door', 'door', 'door', 'window'] : ['window', 'wall', 'window', 'wall', 'window'];
-      }
-      slots[fk].dataUrl = views[fk];
-      slots[fk].fileName = `${preset}_${fk}.jpg`;
-      await analyzeFacePhoto(slots[fk]);
-    }
-    nameInput.value = opts.projectName;
-    spanInput.value = String(opts.refSpanMm);
-    roofSel.value = opts.roofType;
-    refreshUI();
-    toast('전·후·좌·우 4면 샘플 사진과 지정 프레임 분석 결과를 불러왔습니다.', 'ok');
   }
 
   // 이미지 캐시(캔버스에 즉시 그리기 위함)
@@ -212,7 +166,7 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
       ctx.fillText('카메라를 켜거나 사진을 올려 지정 프레임에 건물 외관을 맞춰 주세요.', W / 2, H / 2 - 10);
       ctx.fillStyle = 'rgba(255,255,255,0.35)';
       ctx.font = '400 12.5px "Noto Sans KR", sans-serif';
-      ctx.fillText('우측 상단 [4면 샘플 채우기]를 누르면 즉시 4면 복원 과정을 체험할 수 있습니다.', W / 2, H / 2 + 16);
+      ctx.fillText('정면·배면·좌측면·우측면을 차례로 채우면 정확도가 높아집니다.', W / 2, H / 2 + 16);
     }
 
     // 2) 프레임 바깥 어두운 마스크 (뷰파인더 효과)
@@ -361,7 +315,7 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
   function renderTabs() {
     const doneCount = (['front', 'rear', 'left', 'right'] as FaceKey[]).filter((k) => !!slots[k].dataUrl).length;
     statusBadge.textContent = `${doneCount} / 4면 촬영 완료`;
-    statusBadge.className = `badge ${doneCount === 4 ? 'drawing' : 'demo'}`;
+    statusBadge.className = `badge ${doneCount === 4 ? 'drawing' : 'default'}`;
 
     faceTabsWrap.replaceChildren(...FACE_META.map((m) => {
       const s = slots[m.key];
@@ -489,7 +443,7 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
     fileInput,
     h('div', { class: 'photo-top-bar' },
       faceTabsWrap,
-      h('div', { class: 'photo-top-actions' }, statusBadge, sampleSelect, loadSampleBtn),
+      h('div', { class: 'photo-top-actions' }, statusBadge),
     ),
     h('div', { class: 'photo-main-grid' },
       h('div', { class: 'photo-stage-col' },
@@ -517,6 +471,7 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
     class: 'btn primary',
     type: 'button',
     onclick: () => {
+      if (!slots.front.dataUrl) { toast('정면 사진이 있어야 모델을 만들 수 있습니다. 정면부터 촬영하거나 올려 주세요.', 'warn'); return; }
       stopCamera();
       const res = buildProjectFromFourViews(slots, opts);
       modal.close();
@@ -537,6 +492,4 @@ export function openPhotoModelingModal(cb: PhotoStudioCallbacks) {
   });
   modal.dialog.classList.add('photo-modal');
 
-  // 처음 열 때 즉시 확인할 수 있도록 기본 4면 샘플을 자동으로 채워 둠
-  void loadSampleSet('paljak-5kan');
 }

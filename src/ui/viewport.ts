@@ -3,7 +3,9 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import type { DamageTarget } from '../core/types';
 import { store } from '../app/store';
+import { damagesOf, pillarSeverity } from '../damage/records';
 import { buildHanok, GROUPS, type Build, type GroupKey, type PartInfo } from '../model/hanok';
 import { applyPalette, createMaterials, type MaterialSet } from '../model/materials';
 import { h, icon } from './dom';
@@ -69,6 +71,14 @@ const LIGHT_MOODS: LightMood[] = [
   },
 ];
 
+export interface ViewportActions {
+  addDamage: (t: DamageTarget) => void;
+  showDamages: (t: DamageTarget) => void;
+}
+
+// 손상 조사 모드에서 기둥을 가장 심한 손상 정도의 색으로 칠한다.
+const SEVERITY_HEX = { minor: 0xd4a72c, moderate: 0xdd6b20, severe: 0xc0392b } as const;
+
 export class Viewport {
   readonly el: HTMLElement;
   private renderer: THREE.WebGLRenderer | null = null;
@@ -88,6 +98,9 @@ export class Viewport {
   private anim: { from: THREE.Vector3; to: THREE.Vector3; tFrom: THREE.Vector3; tTo: THREE.Vector3; t0: number } | null = null;
   private selected: { obj: THREE.Mesh; mat: THREE.Material | THREE.Material[] } | null = null;
   private highlight = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xb45309, emissiveIntensity: 0.55, roughness: 0.5 });
+  private damageMats = Object.fromEntries(Object.entries(SEVERITY_HEX).map(([k, c]) =>
+    [k, new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.28, roughness: 0.6 })])) as Record<keyof typeof SEVERITY_HEX, THREE.MeshStandardMaterial>;
+  private damageOrig = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
   private info: HTMLElement;
   private explodeLabel: HTMLElement;
   private explodeInput!: HTMLInputElement;
@@ -96,7 +109,7 @@ export class Viewport {
   private sectionPlane = new THREE.Plane();
   private clipOn = false;
 
-  constructor() {
+  constructor(private act: ViewportActions) {
     this.info = h('div', { class: 'pick-card', hidden: true });
     this.explodeLabel = h('div', { class: 'explode-desc' });
     const presetBar = h('div', { class: 'preset-bar', role: 'toolbar', 'aria-label': '시점' },
@@ -154,6 +167,7 @@ export class Viewport {
     store.on('palette', () => this.recolor());
     store.on('ui', () => this.applyUI());
     store.on('selection', () => this.syncSelection());
+    store.on('damage', () => { this.applyDamageTint(); this.syncSelection(); });
   }
 
   /* ───── 장면 및 PBR 환경광(IBL) ───── */
@@ -277,6 +291,7 @@ export class Viewport {
     if (delay) { this.rebuildTimer = window.setTimeout(() => this.rebuild(0), delay); return; }
     const p = store.project;
     this.clearSelectionHighlight();
+    this.damageOrig.clear();
     if (this.build) { this.holder.remove(this.build.root); disposeTree(this.build.root); this.build = null; }
     if (!p) { this.request(); return; }
     const first = !this.holder.children.length && !this.lastFitFor;
@@ -335,10 +350,36 @@ export class Viewport {
         m.clipShadows = on;
         m.needsUpdate = true;
       }
-      this.highlight.clippingPlanes = on ? [this.sectionPlane] : [];
-      this.highlight.needsUpdate = true;
+      for (const m of [this.highlight, ...Object.values(this.damageMats)]) { m.clippingPlanes = on ? [this.sectionPlane] : []; m.needsUpdate = true; }
+    }
+    this.applyDamageTint();
+    this.request();
+  }
+
+  /** 손상 조사 모드일 때만 손상 기둥을 칠한다. 선택 강조 중인 기둥은 강조를 풀 때 돌아갈 재질만 바꾼다. */
+  private applyDamageTint(on = store.ui.mode === 'survey') {
+    if (!this.build) return;
+    const sev = on && store.project ? pillarSeverity(store.project) : new Map();
+    const setMat = (m: THREE.Mesh, mat: THREE.Material | THREE.Material[]) => {
+      if (this.selected?.obj === m) this.selected.mat = mat; else m.material = mat;
+    };
+    for (const [m, orig] of this.damageOrig) if (!sev.has(this.pillarIdOf(m))) { setMat(m, orig); this.damageOrig.delete(m); }
+    for (const [id, level] of sev) {
+      const m = this.build.pillarMeshes.get(id);
+      if (!m) continue;
+      if (!this.damageOrig.has(m)) this.damageOrig.set(m, this.selected?.obj === m ? this.selected.mat : m.material);
+      setMat(m, this.damageMats[level as keyof typeof SEVERITY_HEX]);
     }
     this.request();
+  }
+
+  private pillarIdOf(m: THREE.Mesh) { return (m.userData.part as PartInfo | undefined)?.pillarId ?? ''; }
+
+  /** 기둥이 아닌 부재 종류 이름(손상 기록 대상 목록용) */
+  partNames(): string[] {
+    const names = new Set<string>();
+    this.build?.root.traverse((o) => { const part = o.userData.part as PartInfo | undefined; if (part && !part.pillarId) names.add(part.name); });
+    return [...names].sort((a, b) => a.localeCompare(b, 'ko'));
   }
 
   /* ───── 카메라 ───── */
@@ -419,22 +460,26 @@ export class Viewport {
       const m = this.build.pillarMeshes.get(s.id);
       if (m && this.selected?.obj !== m) this.setHighlight(m);
       const part = m?.userData.part as PartInfo | undefined;
-      this.showInfo(part?.name ?? `기둥 ${s.id}`, part?.spec ?? '', 'IfcColumn');
+      this.showInfo(part?.name ?? `기둥 ${s.id}`, part?.spec ?? '', 'IfcColumn', { kind: 'pillar', id: s.id });
     } else if (s.kind === 'part') {
-      this.showInfo(s.name, s.spec, s.ifc);
+      this.showInfo(s.name, s.spec, s.ifc, { kind: 'part', name: s.name });
     } else {
       this.setHighlight(null);
       this.info.hidden = true;
     }
   }
 
-  private showInfo(name: string, spec: string, ifc: string) {
+  private showInfo(name: string, spec: string, ifc: string, target: DamageTarget) {
     this.info.hidden = false;
+    const n = store.project ? damagesOf(store.project, target).length : 0;
     this.info.replaceChildren(
       h('div', { class: 'pick-name' }, name),
       spec ? h('div', { class: 'pick-spec' }, spec) : '',
       h('div', { class: 'pick-ifc' }, `BIM 분류: ${ifc}`),
-      h('button', { class: 'btn ghost sm', type: 'button', onclick: () => store.select(null) }, '선택 해제'),
+      n ? h('button', { class: 'pick-damage', type: 'button', onclick: () => this.act.showDamages(target) }, icon('alert', 14), `손상 기록 ${n}건`) : '',
+      h('div', { class: 'pick-actions' },
+        h('button', { class: 'btn sm', type: 'button', onclick: () => this.act.addDamage(target) }, icon('plus', 14), '손상 기록'),
+        h('button', { class: 'btn ghost sm', type: 'button', onclick: () => store.select(null) }, '선택 해제')),
     );
   }
 
@@ -511,6 +556,7 @@ export class Viewport {
     const prev = store.ui.explode;
     if (this.build) for (const g of GROUPS) this.build.groups[g.key].position.y = 0;
     this.clearSelectionHighlight();
+    this.applyDamageTint(false);
     try { return await fn(); } finally {
       store.ui.explode = prev;
       this.applyUI(); this.syncSelection();

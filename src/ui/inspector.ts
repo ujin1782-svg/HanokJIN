@@ -1,16 +1,24 @@
 // 오른쪽 설정 서랍. 선택한 대상에 따라 '모델 설정' / '기둥 속성' / '외벽 칸' / '부재 정보'로 바뀐다.
+// 손상 조사 모드에서는 선택이 없을 때 '손상 조사' 요약을, 부재를 고르면 그 부재의 손상 기록을 먼저 보여 준다.
 // 색감 탭의 팔레트 스와치와 재료 색 선택기는 단색 사각형 대신 나뭇결·기와골·석재 입자·빛의 입체 하이라이트가 반영된 사실적 PBR 재질 칩으로 렌더링한다.
 
-import type { MaterialKey, OpeningKind, Params, Pillar, Project } from '../core/types';
+import type { DamageRecord, DamageTarget, MaterialKey, OpeningKind, Params, Pillar, Project } from '../core/types';
 import { CHOICES, CHEOK_MM, NUM_PARAMS, clampParam, type NumParamDef } from '../core/params';
 import { EDITABLE_MATERIALS, MATERIAL_LABEL, MATERIAL_SURFACE, PALETTES, resolvePalette } from '../model/palettes';
 import { computeFootprint } from '../model/footprint';
 import { store } from '../app/store';
+import { damagesOf, summarize, targetLabel } from '../damage/records';
+import { SEVERITY_LABEL, classById, type ClassId } from '../damage/taxonomy';
+import { CLASS_COLOR } from './damage-editor';
 import { h, icon } from './dom';
 
 export interface InspectorActions {
   deletePillar: (id: string) => void;
   focusPillar: (id: string) => void;
+  addDamage: (t: DamageTarget) => void;
+  editDamage: (id: string) => void;
+  openGuide: () => void;
+  exportDamage: () => void;
 }
 
 const ROLE = { corner: '귀기둥(우주)', edge: '평주', inner: '고주(내진주)' } as const;
@@ -28,16 +36,17 @@ export class Inspector {
         h('button', { class: 'btn icon', type: 'button', 'aria-label': '설정 닫기', onclick: () => store.setUI({ drawer: false }) }, icon('x'))),
       this.body);
     const rerender = () => { if (!this.el.hidden) this.render(); };
-    store.on('selection', () => { if (store.selection && store.selection.kind !== 'part') store.setUI({ drawer: true }); rerender(); });
+    store.on('selection', () => { if (store.selection && (store.selection.kind !== 'part' || store.ui.mode === 'survey')) store.setUI({ drawer: true }); rerender(); });
     store.on('history', rerender);
+    store.on('damage', rerender);
     store.on('project', rerender);
-    let lastTab = store.ui.drawerTab;
+    let lastTab = store.ui.drawerTab, lastMode = store.ui.mode;
     store.on('ui', () => {
       const open = store.ui.drawer && !!store.project;
-      const tabChanged = lastTab !== store.ui.drawerTab;
-      lastTab = store.ui.drawerTab;
+      const changed = lastTab !== store.ui.drawerTab || lastMode !== store.ui.mode;
+      lastTab = store.ui.drawerTab; lastMode = store.ui.mode;
       if (this.el.hidden === open) { this.el.hidden = !open; if (open) this.render(); }
-      else if (open && tabChanged) this.render();
+      else if (open && changed) this.render();
     });
   }
 
@@ -52,16 +61,74 @@ export class Inspector {
     if (s?.kind === 'edge') { this.title.textContent = '외벽 칸'; this.body.replaceChildren(this.edgePanel(p, s)); return; }
     if (s?.kind === 'part') {
       this.title.textContent = '부재 정보';
-      this.body.replaceChildren(h('div', { class: 'section' },
+      this.body.replaceChildren(this.damageSection(p, { kind: 'part', name: s.name }), h('div', { class: 'section' },
         h('div', { class: 'kv' }, h('span', null, '부재'), h('b', null, s.name)),
         s.spec ? h('div', { class: 'kv' }, h('span', null, '규격'), h('b', null, s.spec)) : null,
         h('div', { class: 'kv' }, h('span', null, 'BIM 분류'), h('b', null, s.ifc)),
         h('p', { class: 'hint' }, '부재 크기는 "형태" 탭의 기준 기둥 굵기(주경 D)와 도면 부재 표기로 정해집니다.'),
-        h('button', { class: 'btn', type: 'button', onclick: () => store.select(null) }, '모델 설정으로 돌아가기')));
+        h('button', { class: 'btn', type: 'button', onclick: () => store.select(null) }, store.ui.mode === 'survey' ? '손상 조사 요약으로' : '모델 설정으로 돌아가기')));
+      return;
+    }
+    if (store.ui.mode === 'survey') {
+      this.title.textContent = '손상 조사';
+      this.body.replaceChildren(this.surveyPanel(p));
       return;
     }
     this.title.textContent = '모델 설정';
     this.body.replaceChildren(this.modelPanel(p));
+  }
+
+  /* ───── 손상 조사 ───── */
+  private surveyPanel(p: Project) {
+    const sum = summarize(p.damages);
+    const recent = [...p.damages].reverse().slice(0, 30);
+    return h('div', null,
+      h('div', { class: 'section' },
+        h('div', { class: 'survey-stats' },
+          h('div', null, h('b', null, String(sum.total)), h('span', null, '손상 기록')),
+          h('div', null, h('b', null, String(sum.verified)), h('span', null, '검수 완료')),
+          h('div', null, h('b', null, String(sum.withPhoto)), h('span', null, '사진')),
+          h('div', null, h('b', null, String(sum.boxes)), h('span', null, '표시 영역'))),
+        sum.byClass.length ? h('div', { class: 'survey-bars' }, ...sum.byClass.map((r) => {
+          const c = classById(r.cls);
+          return h('div', { class: 'survey-bar', style: `--c:${CLASS_COLOR[c.id]}` },
+            h('span', null, c.ko), h('span', { class: 'survey-track' }, h('span', { style: `width:${(r.count / sum.byClass[0].count) * 100}%` })), h('b', null, String(r.count)));
+        })) : null),
+      h('div', { class: 'section' },
+        h('div', { class: 'section-title' }, '조사 방법'),
+        h('ol', { class: 'survey-steps' },
+          h('li', null, '도면이나 3D에서 ', h('b', null, '기둥·부재를 누릅니다'), '.'),
+          h('li', null, h('b', null, '손상 사진'), '을 올리고 손상 영역을 끌어서 표시합니다.'),
+          h('li', null, '보고서 표기를 넣으면 ', h('b', null, '표준 용어로 교정'), '해 드립니다. 분류와 정도를 고르세요.'),
+          h('li', null, '조사내용 문구를 확인하고 ', h('b', null, '검수 완료'), '로 저장합니다.')),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', type: 'button', onclick: () => this.act.addDamage({ kind: 'other', name: '' }) }, icon('plus', 15), '부재 없이 기록'),
+          h('button', { class: 'btn ghost', type: 'button', onclick: () => this.act.openGuide() }, icon('help', 15), '용어 안내'))),
+      h('div', { class: 'section' },
+        h('div', { class: 'section-title' }, '최근 기록', sum.total ? h('button', { class: 'btn ghost xs', type: 'button', onclick: () => store.setUI({ bottom: true, bottomTab: 'damage' }) }, '전체 보기') : null),
+        recent.length ? h('div', { class: 'dmg-list' }, ...recent.map((d) => this.damageItem(p, d, true)))
+          : h('p', { class: 'hint' }, '아직 기록이 없습니다.')),
+      sum.total ? h('button', { class: 'btn primary block', type: 'button', onclick: () => this.act.exportDamage() }, icon('download', 15), '조사표·학습 데이터 내보내기') : null,
+    );
+  }
+
+  private damageSection(p: Project, t: DamageTarget) {
+    const list = damagesOf(p, t);
+    return h('div', { class: `section dmg-section ${store.ui.mode === 'survey' ? 'emph' : ''}` },
+      h('div', { class: 'section-title' }, `손상 기록${list.length ? ` ${list.length}건` : ''}`,
+        h('button', { class: 'btn sm', type: 'button', onclick: () => this.act.addDamage(t) }, icon('plus', 14), '추가')),
+      list.length ? h('div', { class: 'dmg-list' }, ...list.map((d) => this.damageItem(p, d, false)))
+        : h('p', { class: 'hint' }, '이 부재에 기록된 손상이 없습니다. 사진과 함께 손상을 기록하면 조사표와 학습 데이터로 내보낼 수 있습니다.'));
+  }
+
+  private damageItem(p: Project, d: DamageRecord, withTarget: boolean) {
+    const c = classById(d.cls as ClassId);
+    return h('button', { class: 'dmg-item', type: 'button', onclick: () => this.act.editDamage(d.id) },
+      h('span', { class: 'dmg-chip', style: `--c:${CLASS_COLOR[c.id]}` }, c.ko),
+      h('span', { class: 'dmg-item-text' },
+        h('b', null, withTarget ? targetLabel(p, d.target) : (d.location || c.ko)),
+        h('span', null, `${d.id} · ${SEVERITY_LABEL[d.severity]}${d.photo ? ` · 사진${d.boxes.length ? ` ${d.boxes.length}영역` : ''}` : ''}`)),
+      h('span', { class: `badge ${d.status === 'verified' ? 'drawing' : 'default'}` }, d.status === 'verified' ? '검수' : '검토 중'));
   }
 
   /* ───── 모델 설정 ───── */
@@ -159,7 +226,7 @@ export class Inspector {
         h('p', { class: 'hint' }, changed.length ? `바꾼 항목 ${changed.length}개를 초기 인식 값으로 되돌립니다.` : '바꾼 값이 없습니다.'),
         h('button', { class: 'btn', type: 'button', disabled: !changed.length, onclick: () => store.commit('모든 값 되돌리기', (q) => { q.params = { ...q.baseline }; }, 'params') }, icon('reset', 15), '되돌리기')),
       h('div', { class: 'section' },
-        h('div', { class: 'section-title' }, p.demo ? '예제 정보' : '모델 인식·복원 정보'),
+        h('div', { class: 'section-title' }, '모델 인식·복원 정보'),
         h('div', { class: 'kv' }, h('span', null, '원본'), h('b', null, p.source.fileName ?? '-')),
         h('div', { class: 'kv' }, h('span', null, '형식'), h('b', null, p.source.format ?? '-')),
         p.source.area ? h('div', { class: 'kv' }, h('span', null, '건축 면적'), h('b', null, p.source.area)) : null,
@@ -222,6 +289,7 @@ export class Inspector {
     };
     const span = Math.max(...p.grid.xs, ...p.grid.ys, 10000) + 5000;
     return h('div', null,
+      store.ui.mode === 'survey' ? this.damageSection(p, { kind: 'pillar', id: pl.id }) : null,
       h('div', { class: 'section' },
         h('div', { class: 'pillar-head' }, h('span', { class: `dot ${pl.review ? 'warn' : pl.source === 'user' ? 'user' : 'ok'}` }), h('b', null, pl.id), h('span', { class: 'muted' }, ROLE[role])),
         h('div', { class: 'kv' }, h('span', null, '출처'), h('b', null, pl.source === 'user' ? '직접 입력·수정' : `인식 완료 (신뢰도 ${Math.round(pl.confidence * 100)}%)`)),
@@ -238,7 +306,8 @@ export class Inspector {
       h('div', { class: 'section row' },
         h('button', { class: 'btn', type: 'button', onclick: () => this.act.focusPillar(pl.id) }, icon('eye', 15), '위치 보기'),
         h('button', { class: 'btn danger', type: 'button', onclick: () => this.act.deletePillar(pl.id) }, icon('trash', 15), '기둥 삭제')),
-      h('button', { class: 'btn ghost', type: 'button', onclick: () => store.select(null) }, '모델 설정으로 돌아가기'),
+      store.ui.mode === 'survey' ? null : this.damageSection(p, { kind: 'pillar', id: pl.id }),
+      h('button', { class: 'btn ghost', type: 'button', onclick: () => store.select(null) }, store.ui.mode === 'survey' ? '손상 조사 요약으로' : '모델 설정으로 돌아가기'),
     );
   }
 
@@ -271,7 +340,7 @@ function sourceBadge(p: Project, key: keyof Params) {
   const s = p.paramSource[key];
   if (p.params[key] !== p.baseline[key]) return h('span', { class: 'badge user', 'data-tip': `직접 바꾼 값입니다 (처음 값: ${p.baseline[key]})` }, '수정함');
   if (s?.source === 'drawing') return h('span', { class: 'badge drawing', 'data-tip': s.note ?? '도면/사진에서 읽은 값입니다' }, '인식값');
-  return h('span', { class: 'badge default', 'data-tip': p.demo ? '예제 값입니다' : '기본 비례로 정한 값입니다' }, p.demo ? '예제' : '기본값');
+  return h('span', { class: 'badge default', 'data-tip': '기본 비례로 정한 값입니다' }, '기본값');
 }
 
 const SVGNS = 'http://www.w3.org/2000/svg';

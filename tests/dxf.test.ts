@@ -5,7 +5,7 @@ import { normalize } from '../src/cad/normalize';
 import { segmentSheets } from '../src/cad/sheets';
 import { recognize } from '../src/cad/recognize';
 import { computeFootprint } from '../src/model/footprint';
-import { DEMOS, makeDemo } from '../src/samples';
+import { DEMOS, makeDemo } from './fixtures/demo-projects';
 
 const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
 
